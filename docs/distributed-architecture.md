@@ -326,6 +326,119 @@ it is pure-function code that already has its own test suite and its own eval ga
 
 ---
 
+## 10. The learning plane — closing the loop without breaking the invariant
+
+The decision plane **is** inside a loop. The design question is not *whether* it learns
+but *through what path* the loop closes. The rule:
+
+> **Learning is continuous in collection, batched in application, and gated in
+> promotion. Gradient descent for generation; pull requests for acceptance.**
+
+```
+      GENERATION (models free)      ACCEPTANCE (models forbidden)      MEASUREMENT
+   Gemma+LoRA · agents · bandits ──►  rule packs · stats core    ──►  experiments ·
+        ▲            ▲                        ▲                        trace spine
+        │            │                        │                            │
+        │      LoRA fine-tunes         rule-pack diffs                     │
+        │      (nightly, eval-gated,   (PROPOSED + evidence bundle,        │
+        │       shadow → red-black)     shadow → human → versioned)       │
+        │            │                        │                            │
+        └────────────┴────── LEARNING PLANE ──┴────────────────────────────┘
+          trace curator · calibration monitor · policy learner ·
+          fine-tune farm · harness scenario miner · A/A injector
+```
+
+### Four loops, four cadences
+
+**Loop 0 — statistical adaptivity (milliseconds, online, frozen rule).** Posteriors and
+guardrail rates update with every event; the *update rule* (Beta-Binomial, thresholds,
+precedence) is frozen. Online data flowing through a frozen function is the only
+"learning" permitted on the accept path — and it is not model learning, it is the
+decision function consuming fresh sufficient statistics. This is why the system feels
+adaptive without being mutable.
+
+**Loop 1 — the local model learns from traces (continuous collection, nightly-to-weekly
+application).** The segregated trace spine (§6) is deliberately a **dataset factory**:
+decision-linked traces are kept at 100% and carry `trace_id ↔ experiment_id ↔ human
+verdict ↔ realized outcome`, so generation spans can be joined to what actually happened:
+
+| Trace join | Yields | Trains |
+|---|---|---|
+| narrative spans × human-gate verdicts | preference pairs (approved vs rejected + stated reason) | analyst adapter (DPO/SFT) |
+| hypothesis/designer spans × validator results × realized lift | SFT weighted by first-try validation and outcome | design adapters |
+| rec/chat spans × propensity-logged conversions | reward-weighted examples | PS5 adapters |
+| retrieval spans × "cited precedent led to validated config" | positive/negative retrieval pairs | embedding/reranker fine-tune |
+
+Pipeline: **Trace Curator** (Kafka consumer over outcome-mature windows) → versioned
+datasets (MLflow-logged; PII already scrubbed at the collector, upstream of everything) →
+**LoRA fine-tune jobs** on the same vLLM GPU fleet in an off-peak queue → offline evals
+(harness + golden prompts + adapter-specific suites) → **shadow** (generate-but-don't-
+serve, divergence judged) → red-black promotion. Every adapter version is attributable
+to an exact dataset version and trace window — model lineage with receipts.
+
+**Loop 2 — decision calibration (learning proposes; humans and the harness dispose).**
+A streaming **calibration monitor** joins decision records to realized outcomes and
+maintains reliability curves per rule-pack version: *of all verdicts issued at stated
+confidence 0.95–0.97, what fraction proved correct?* When stated 0.95 realizes at 0.80,
+it emits an evidence bundle, and a policy-learner agent drafts a **proposed rule-pack
+diff** with that evidence attached. The proposal then takes the only road that exists
+for pack changes: eval-harness regression → shadow champion/challenger on live traffic
+(challenger verdicts logged, never enforced) → human sign-off → versioned deploy.
+The decision plane evolves continuously — via auditable diffs, never via gradients.
+
+**Loop 3 — the harness itself learns (weeks).** Every production incident — a decision
+later proven wrong, a novel failure mode — becomes a new synthetic scenario in the eval
+suite, exactly as the day-one peeking defect did during the original build. In parallel,
+the platform continuously self-tests in production: perpetual **A/A experiments** to
+detect false-positive inflation, and **synthetic SRM canaries** to prove the monitors
+still fire. The immune system grows from real infections.
+
+### Preconditions for learning from traces (or the loop learns lies)
+
+1. **Propensity logging.** Every stochastic choice — rec served, action selected,
+   exploration taken — logs its probability, and every decision record logs the
+   *eligible-action set*, not just the chosen action. Off-policy learning from traces
+   without logged propensities is biased by construction: you learn from a filtered
+   world and can't correct for the filter.
+2. **Randomization comes from experiments.** Causal credit assignment uses experiment
+   variants (PS3), never observational correlations mined from traces.
+3. **Outcome maturity.** Labels are delayed and censored (experiments run 14 days);
+   datasets build only on outcome-mature windows, never same-day proxies.
+4. **No unlogged mutation.** Any component whose behavior changes without a version bump
+   has broken replayability and is, by definition, a bug — not a feature.
+
+### Why the accept path never learns online
+
+Five reasons, each individually sufficient:
+
+1. **Goodhart / reward hacking.** A gate that optimizes observed reward learns to
+   approve more, because approvals generate the very engagement signals that reward it.
+   Degenerate feedback loops in recommenders are the canonical failure.
+2. **Delayed, censored ground truth.** Real outcomes arrive weeks later; online updates
+   necessarily optimize same-day proxies — the exact thing the peeking guard forbids.
+3. **Auditability.** "Why was this decided?" must be answerable forever, which requires
+   decision = pure function of (inputs, pack version). Continuously-updating weights on
+   the accept path destroy replay.
+4. **Sample inefficiency.** The platform produces one labeled outcome per experiment,
+   not millions of rollouts. Reflexion-style episodic learning fits this data scale;
+   online RL does not.
+5. **Poisoning surface.** A buggy — or adversarial — generator upstream could steer an
+   online-learning gate. A frozen gate bounded by versioned packs cannot be steered,
+   only petitioned.
+
+### Where genuine online learning does belong
+
+PS5's next-best-action and recommendation policies can be true **contextual bandits**,
+online-updating — *in the generation plane*. The bandit proposes an action and logs its
+propensity; the Decision Service still gates every proposal against eligibility,
+guardrail, and compliance packs deterministically. **Exploration is a generation-plane
+behavior; acceptance never explores.** This is the decision-science answer to
+"continuously learning locally": the local model gets smarter every night from the trace
+flywheel, the bandits adapt in real time — and the gate they all pass through changes
+only by versioned, evidenced, human-approved diffs.
+
+---
+
 ## Sources
 
 - [In-House LLM Serving at Netflix](https://netflixtechblog.com/in-house-llm-serving-at-netflix-a5a8e799ea2c) — Netflix AI Platform (Model Runtime & Inference)
