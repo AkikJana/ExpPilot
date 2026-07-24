@@ -1,0 +1,52 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "exppilot"
+version = "0.1.0"
+description = "AI Experiment Copilot & Decision Intelligence — DTDL Talent Hack PS3"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [{ name = "ExpPilot Team" }]
+keywords = ["experimentation", "ab-testing", "llm", "langgraph", "rag", "copilot"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+dependencies = [
+    "fastapi==0.115.6",
+    "uvicorn[standard]==0.34.0",
+    "pydantic==2.10.4",
+    "langgraph>=0.2.60",
+    "langgraph-checkpoint-sqlite>=2.0.1",
+    "langchain>=0.3.14",
+    "langchain-anthropic>=0.3.3",
+    "langchain-core>=0.3.29",
+    "numpy==2.2.1",
+    "scipy==1.14.1",
+    "statsmodels==0.14.4",
+    "mlflow==2.19.0",
+    "streamlit==1.41.1",
+    "httpx==0.28.1",
+    "requests==2.32.3",
+]
+
+[project.optional-dependencies]
+dev = ["pytest==8.3.4", "build>=1.2"]
+
+[project.urls]
+Homepage = "https://github.com/AkikJana/ExpPilot"
+Repository = "https://github.com/AkikJana/ExpPilot"
+
+[project.scripts]
+exppilot-seed = "data.seed:main"
+exppilot-eval = "evals.harness:run"
+
+[tool.setuptools]
+packages = ["agents", "api", "data", "evals", "shared", "stats", "ui"]
+
+[tool.setuptools.package-data]
+"*" = ["*.md"]
