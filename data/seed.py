@@ -93,6 +93,10 @@ def seed_demo_experiments(conn) -> None:
         config, day_stats, ground_truth = make_experiment(scenario, seed)
         config_dict = config.model_dump()
         config_dict["id"] = demo_id
+        # Persist the simulator seed so the experiment can be advanced day-by-day
+        # deterministically. correct_action stays inside ground_truth for evals only;
+        # the copilot decision path never reads it.
+        ground_truth = {**ground_truth, "seed": seed}
         conn.execute(
             "INSERT OR REPLACE INTO experiments (id, config, status, ground_truth) VALUES (?, ?, ?, ?)",
             (demo_id, json.dumps(config_dict), "running", json.dumps(ground_truth)),
