@@ -427,7 +427,7 @@ def _cumulative_day_stats(experiment_id: str, day: int) -> DayStats:
     conn = get_conn()
     try:
         rows = conn.execute(
-            "SELECT data FROM day_stats WHERE experiment_id = ? AND day <= ? ORDER BY day",
+            "SELECT data FROM day_stats WHERE experiment_id = ? AND day > 0 AND day <= ? ORDER BY day",
             (experiment_id, day),
         ).fetchall()
     finally:
