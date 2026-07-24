@@ -1,0 +1,15 @@
+.venv/
+__pycache__/
+*.pyc
+dist/
+build/
+*.egg-info/
+*.db
+*.db-journal
+mlruns/
+mlartifacts/
+.DS_Store
+checkpoints.db
+*.db-shm
+*.db-wal
+.env

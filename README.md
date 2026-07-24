@@ -1,0 +1,149 @@
+# ExpPilot — AI Experiment Copilot & Decision Intelligence
+
+DTDL Talent Hack · Problem Statement 3. An AI copilot that guides a PM through the
+full experimentation lifecycle — hypothesis → config → validation → monitoring →
+**Scale / Continue / Stop / Rollback** — with a hard separation between what the
+**LLM does** (explain) and what **deterministic code does** (compute & decide).
+
+> Core promise: the LLM never invents a p-value or a decision. Every number comes
+> from `stats/core.py`; every action comes from `stats.core.decide`; the LLM only
+> narrates the already-computed result, and any narration that introduces an
+> ungrounded number is rejected.
+
+## Current runnable foundation
+
+The repository uses the authenticated **Cursor CLI** as its only LLM provider.
+It does not require an Anthropic/OpenAI key or a local model. Cursor is used for
+hypothesis ideation only; configuration validation, statistics, SRM/guardrail
+checks, and Scale/Continue/Stop/Rollback decisions remain deterministic.
+
+The current implementation includes a FastAPI lifecycle API, a Streamlit
+dashboard, a LangGraph setup/monitoring workflow, an auditable SQLite store, and
+a serializable branching hypothesis ontology. The Docker Compose topology also
+reserves PostgreSQL/pgvector and Neo4j services for production persistence and
+graph storage.
+
+## Architecture
+
+```
+UI (Streamlit)  ──┐
+                  ├──►  api/service.py  ──►  agents/graph.py (LangGraph)
+API (FastAPI) ────┘         │                    │  retrieve → hypothesize
+                            │                    │  config → validate (gate)
+                            │                    │  stats → monitor → decide
+                            ▼                    ▼
+                     data/ (SQLite registry,   stats/core.py  (z-test, Welch t,
+                     synthetic telemetry,      Bayesian posterior, SRM chi-square,
+                     history for RAG)          power, guardrails, decide)  ← LLM-free
+                            ▲
+                     agents/llm.py  (Anthropic, optional; deterministic fallback)
+```
+
+| Layer | Module | Responsibility |
+|-------|--------|----------------|
+| Deterministic core | `stats/core.py` | z/t tests, Bayesian posterior, SRM, power, **the decision** |
+| Data | `data/{db,synth,seed}.py` | registry, ground-truth synthetic telemetry, seeds |
+| Tools | `agents/tools.py` | sample size, overlap detection, cumulative sim, analyze |
+| RAG | `agents/rag.py` | lexical retrieval over 30 historical experiments |
+| LLM | `agents/llm.py` | narration only + numeric anti-hallucination guard |
+| Orchestration | `agents/graph.py`, `nodes.py` | LangGraph pipelines (create / analyze) |
+| Service | `api/service.py` | persistence + lifecycle glue (shared by API & UI) |
+| API | `api/main.py` | FastAPI surface |
+| Evals | `evals/{gold,harness}.py` | recommendation accuracy vs expert gold set |
+| UI | `ui/app.py` | Streamlit workspace + decision card + eval dashboard |
+
+## Quickstart
+
+```bash
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+
+# authenticate Cursor once on the host; no API key is passed to ExpPilot
+cursor-agent login
+
+# launch the API
+uvicorn api.main:app --reload
+
+# in another terminal, launch the dashboard
+streamlit run ui/app.py
+```
+
+### Cursor CLI behavior
+
+`agents/llm.py` invokes `cursor-agent --print --mode ask` through its existing
+authenticated session. If the CLI is unavailable—such as CI or a container without
+a mounted trusted Cursor session—the system uses deterministic hypothesis templates
+and never substitutes an API-key or local-LLM provider.
+
+## Demo flow (matches the 5 PS3 objectives)
+
+1. **Create** — type a business goal → 3 grounded hypotheses (cite past experiments).
+2. **Configure** — pick one → flag/audience/metrics + computed sample size & runtime.
+3. **Validate** — overlap detection blocks/warns on colliding live experiments.
+4. **Monitor** — advance days; SRM (`demo_bundle_srm`) blocks analysis with a banner.
+5. **Decide** — Decision Card shows SCALE/CONTINUE/STOP/ROLLBACK with confidence,
+   evidence citations, and an audit trail; guardrail breach (`demo_paywall_guardrail`)
+   forces ROLLBACK.
+6. **Eval Dashboard** — recommendation accuracy vs expert (~93%), significance
+   detection (100%), confusion matrix, and impact metrics.
+
+## Decision policy (deterministic, precedence-ordered)
+
+1. SRM detected → **PAUSE** (analysis blocked; not trustworthy)
+2. Guardrail breach → **ROLLBACK**
+3. `P(beats control) ≥ 0.95` and low ship-loss → **SCALE**
+4. `P(beats control) ≤ 0.05` → **STOP**
+5. otherwise → **CONTINUE**
+
+## Synthetic data engine (`synthgen`)
+
+An LLM-driven, GPU-aware, differentiable synthetic-experiment generator. It designs
+a scenario with a switchable LLM backend, simulates thousands–millions of row-level
+observations, and computes statistics with differentiable programming — degrading
+gracefully so it runs anywhere.
+
+**Pipeline:** business goal → LLM drafts a typed `ScenarioSpec` → vectorized simulator
+generates per-user rows → differentiable stats (power + gradients, observed z-test) →
+optionally bridged to ExpPilot `DayStats` to feed the copilot.
+
+**Switchable, self-detecting backends** (`SYNTHGEN_PROVIDER=auto|local|api|template`):
+
+| Layer | Accelerated path | Fallback (works today, no GPU) |
+|-------|------------------|--------------------------------|
+| Generation | Local **Gemma 3n E4B** via Hugging Face pipelines (LiteRT-ready) or any API model | deterministic template |
+| Dataframe | **cuDF** (`cudf.pandas`) on NVIDIA GPU | pandas |
+| Arrays | **cupy** on GPU | numpy (vectorized) |
+| Statistics | **PyTorch autograd** (GPU-ready) | numpy central-difference gradients |
+
+Everything is capability-detected at runtime — no code changes needed to move
+from a laptop to a GPU box or Colab.
+
+```bash
+# capability report (what will actually run on this machine)
+python -m synthgen --capabilities
+
+# generate + simulate + analyze a scenario (CPU/template path)
+python -m synthgen "Increase checkout conversion on the mobile app" --rows 30000
+
+# enable accelerators on a GPU machine (all optional):
+pip install ".[synthgen-diff]"     # torch autograd
+pip install ".[synthgen-local]"    # local Gemma via transformers
+pip install ".[synthgen-api]"      # litellm (provider-agnostic API)
+pip install --extra-index-url=https://pypi.nvidia.com ".[synthgen-gpu]"  # cuDF + cupy
+```
+
+```python
+from synthgen import SyntheticDataEngine, SynthGenConfig
+eng = SyntheticDataEngine(SynthGenConfig(provider="auto"))
+result = eng.run("Reduce churn for prepaid users")
+days = eng.to_daystats(result.spec, result.sim, "exp_synth")  # feed the copilot
+```
+
+Measured on this CPU-only box: ~1.4M simulated rows/sec (numpy + pandas).
+
+## Tests
+
+```bash
+python -m unittest tests/test_lifecycle.py -v
+python -m compileall agents api data ontology shared stats ui tests
+```

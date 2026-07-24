@@ -1,0 +1,14 @@
+.venv/
+.git/
+__pycache__/
+*.pyc
+*.db
+*.db-journal
+mlruns/
+mlartifacts/
+dist/
+build/
+*.egg-info/
+.pytest_cache/
+evals/report.md
+.env

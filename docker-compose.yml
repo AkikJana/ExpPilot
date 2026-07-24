@@ -1,0 +1,47 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: exppilot
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: exppilot
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U exppilot -d exppilot"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  neo4j:
+    image: neo4j:5-community
+    environment:
+      NEO4J_AUTH: neo4j/${NEO4J_PASSWORD:?set NEO4J_PASSWORD in .env}
+    ports: ["7474:7474", "7687:7687"]
+    volumes:
+      - neo4j_data:/data
+
+  api:
+    build: .
+    command: uvicorn api.main:app --host 0.0.0.0 --port 8000
+    environment:
+      DATABASE_URL: postgresql://exppilot:${POSTGRES_PASSWORD}@postgres:5432/exppilot
+      NEO4J_URI: bolt://neo4j:7687
+    depends_on:
+      postgres:
+        condition: service_healthy
+      neo4j:
+        condition: service_started
+    ports: ["8000:8000"]
+
+  ui:
+    build: .
+    command: streamlit run ui/app.py --server.address 0.0.0.0 --server.port 8501
+    environment:
+      EXPILOT_API_URL: http://api:8000
+    depends_on: [api]
+    ports: ["8501:8501"]
+
+volumes:
+  postgres_data:
+  neo4j_data:
