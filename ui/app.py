@@ -42,6 +42,18 @@ _ACTION_STYLE = {
     "pause": ("#f4b400", "⏸️ PAUSE (blocked)"),
 }
 
+# Manual-baseline assumptions for the two "reduction in time" evals. These are
+# STATED ASSUMPTIONS about how long each task takes a human analyst without the
+# copilot -- they are not measured by this system, and the dashboard labels them
+# as such. Only the copilot-side timings beside them are real measurements.
+#
+#   Creation: write a hypothesis, pick a flag and audience, choose metrics, run a
+#            power calculation, check for overlapping live experiments.
+#   Analysis: pull the day's counts, run the significance test, check SRM and
+#            guardrails, interpret, and write a readout for a PM.
+MANUAL_CREATE_MINUTES = 40
+MANUAL_ANALYSIS_MINUTES = 25
+
 
 def _init_state() -> None:
     service.ensure_ready()
@@ -52,6 +64,10 @@ def _init_state() -> None:
     ss.setdefault("create_elapsed", None)
     ss.setdefault("accepts", 0)
     ss.setdefault("proposals", 0)
+    # Analysis-time eval: accumulated so the dashboard can report a mean across
+    # every analysis run this session, rather than whichever one happened last.
+    ss.setdefault("analysis_seconds_total", 0.0)
+    ss.setdefault("analysis_count", 0)
 
 
 def _badge(text: str) -> str:
@@ -147,6 +163,33 @@ def _render_config(result: dict) -> None:
 
 
 # --------------------------------------------------------------------------- #
+def _timed_advance(exp_id: str, max_days: int) -> None:
+    """Advance the experiment, timing the analysis for the 'reduction in analysis
+    time' eval.
+
+    What is being timed is the work a human analyst would otherwise do by hand for
+    each day of results: compute the significance test, run the SRM and guardrail
+    checks, derive the recommendation, and write the business-language readout.
+    That is exactly `service.advance_experiment`, so wrapping it measures the real
+    thing rather than a proxy. Elapsed time is accumulated per analysed day so the
+    dashboard reports a per-analysis mean, whether the PM advanced one day or ran
+    the experiment to conclusion.
+    """
+    ss = st.session_state
+    started = time.perf_counter()
+    analysed_days = 0
+    for _ in range(max_days):
+        out = service.advance_experiment(exp_id)
+        analysed_days += 1
+        if out["action"] in ("scale", "stop", "rollback"):
+            break
+    elapsed = time.perf_counter() - started
+
+    if analysed_days:
+        ss.analysis_seconds_total += elapsed
+        ss.analysis_count += analysed_days
+
+
 def page_monitor() -> None:
     st.header("3 · Monitor & decide")
     exps = service.list_experiments()
@@ -160,12 +203,9 @@ def page_monitor() -> None:
 
     ctrl1, ctrl2, _ = st.columns([1, 1, 3])
     if ctrl1.button("▶️ Advance one day"):
-        service.advance_experiment(exp_id)
+        _timed_advance(exp_id, max_days=1)
     if ctrl2.button("⏭️ Run to conclusion"):
-        for _ in range(14):
-            out = service.advance_experiment(exp_id)
-            if out["action"] in ("scale", "stop", "rollback"):
-                break
+        _timed_advance(exp_id, max_days=14)
 
     detail = service.get_experiment(exp_id)
     series = detail["series"]
@@ -263,13 +303,43 @@ def page_evals() -> None:
     st.divider()
     st.subheader("Impact metrics (demo)")
     adopt = service.adoption_stats()
-    k1, k2, k3, k4 = st.columns(4)
+    k1, k2, k3, k4, k5 = st.columns(5)
+
     elapsed = ss.get("create_elapsed")
-    k1.metric("Creation time", f"{elapsed:.0f}s" if elapsed else "—", "vs ~40 min manual")
+    k1.metric(
+        "Creation time",
+        f"{elapsed:.0f}s" if elapsed else "—",
+        f"vs ~{MANUAL_CREATE_MINUTES} min manual",
+    )
+
     accept_rate = (ss.accepts / ss.proposals) if ss.proposals else None
     k2.metric("Config acceptance", f"{accept_rate*100:.0f}%" if accept_rate is not None else "—")
-    k3.metric("Recommendations", adopt["total_decisions"])
-    k4.metric("Adoption rate", f"{adopt['adoption_rate']*100:.0f}%" if adopt["adoption_rate"] is not None else "—")
+
+    # Reduction in experiment analysis time: mean wall-clock seconds per analysed
+    # day, measured in _timed_advance, against the stated manual baseline.
+    analysis_mean = (ss.analysis_seconds_total / ss.analysis_count) if ss.analysis_count else None
+    k3.metric(
+        "Analysis time",
+        f"{analysis_mean:.1f}s" if analysis_mean is not None else "—",
+        f"vs ~{MANUAL_ANALYSIS_MINUTES} min manual",
+    )
+
+    k4.metric("Recommendations", adopt["total_decisions"])
+    k5.metric("Adoption rate", f"{adopt['adoption_rate']*100:.0f}%" if adopt["adoption_rate"] is not None else "—")
+
+    if analysis_mean is not None:
+        st.caption(
+            f"Analysis time is the mean over {ss.analysis_count} analysed "
+            f"{'day' if ss.analysis_count == 1 else 'days'} this session — significance test, "
+            f"SRM and guardrail checks, recommendation, and written readout. "
+            f"Manual baselines ({MANUAL_CREATE_MINUTES} min create / {MANUAL_ANALYSIS_MINUTES} min "
+            f"analyse) are stated assumptions, not measurements; the copilot-side timings are real."
+        )
+    else:
+        st.caption(
+            "Analysis time appears once you advance an experiment on the "
+            "'Monitor & Decide' page."
+        )
 
 
 # --------------------------------------------------------------------------- #
