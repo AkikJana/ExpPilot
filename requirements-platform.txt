@@ -1,0 +1,28 @@
+# Optional dependencies for docs/distributed-architecture.md's distributed/ package.
+# Every module under distributed/ runs and is tested without any of these installed —
+# each guards its import and degrades to a documented, typed error or a no-op
+# (see distributed/README.md's "scope and honesty" section). Install any subset
+# below to light up the corresponding real backend.
+#   pip install -r requirements-platform.txt
+
+# ---------------------------------------------------------------------------
+# Postgres + pgvector (distributed/vector/pgvector_index.py, distributed/db/).
+# psycopg[binary] avoids needing libpq installed system-wide.
+# ---------------------------------------------------------------------------
+psycopg[binary]>=3.1
+pgvector>=0.3
+
+# ---------------------------------------------------------------------------
+# Kafka client (distributed/eventbus/kafka_bus.py). Pure Python, no librdkafka
+# C bindings required — deliberately chosen over confluent-kafka for the same
+# reason the rest of this repo prefers pure-Python optional deps.
+# ---------------------------------------------------------------------------
+kafka-python>=2.0
+
+# ---------------------------------------------------------------------------
+# OpenTelemetry SDK + OTLP exporter (distributed/tracing/spine.py). Note:
+# opentelemetry-sdk is frequently already present transitively via mlflow's own
+# tracing support — check before assuming it's absent.
+# ---------------------------------------------------------------------------
+opentelemetry-sdk>=1.27
+opentelemetry-exporter-otlp-proto-grpc>=1.27

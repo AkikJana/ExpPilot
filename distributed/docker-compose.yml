@@ -1,0 +1,104 @@
+# Local dev topology for docs/distributed-architecture.md. Not started or
+# verified in this environment (see distributed/README.md "scope and honesty"
+# section) — reviewed config, ready for `docker compose up` on a machine with
+# Docker available.
+#
+# Deliberately does NOT include a vLLM service: this repo's dev machine has no
+# CUDA GPU, and vLLM's CPU backend is neither representative of production
+# performance nor reliably installable cross-platform. `ollama` stands in as
+# the realistic way to run Gemma locally on a laptop (Metal/CPU backends via
+# llama.cpp) — see distributed/gateway/model_gateway.py's Tier 1 client, which
+# talks to Ollama's API and is a one-function swap to call a real vLLM/Triton
+# gateway in production.
+#
+# Usage:
+#   docker compose -f distributed/docker-compose.yml up -d postgres redpanda jaeger otel-collector
+#   psql "$POSTGRES_DSN" -f distributed/db/migrations/001_exp_schema.sql
+#   ... (002 through 005, in order — see distributed/db/migrations/README.md)
+#   docker compose -f distributed/docker-compose.yml up decision-service
+#   ollama pull gemma2:9b   # only if using the local inference tier
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: exppilot
+      POSTGRES_PASSWORD: dev_only_change_in_prod
+      POSTGRES_DB: exppilot
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U exppilot"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # Kafka-API-compatible, single binary, no ZooKeeper — the pragmatic substitute
+  # for a full Kafka cluster on a laptop (§3's Netflix-scale topology assumes a
+  # managed Kafka; this is the local-dev equivalent, same wire protocol).
+  redpanda:
+    image: docker.redpanda.com/redpandadata/redpanda:v24.2.7
+    command:
+      - redpanda
+      - start
+      - --smp=1
+      - --memory=512M
+      - --overprovisioned
+      - --node-id=0
+      - --check=false
+      - --kafka-addr=PLAINTEXT://0.0.0.0:9092
+      - --advertise-kafka-addr=PLAINTEXT://redpanda:9092
+    ports:
+      - "9092:9092"
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.108.0
+    command: ["--config=/etc/otel-collector-config.yaml"]
+    volumes:
+      - ./tracing/otel-collector-config.yaml:/etc/otel-collector-config.yaml:ro
+    ports:
+      - "4317:4317" # OTLP gRPC
+      - "4318:4318" # OTLP HTTP
+    depends_on:
+      - jaeger
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.60
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "16686:16686" # Jaeger UI
+      - "4319:4317"   # OTLP gRPC, remapped so it doesn't collide with the collector above
+
+  # Realistic local stand-in for the vLLM+Gemma fleet (see the header comment).
+  # Not started by default — `docker compose up ollama` opts in, since it's a
+  # multi-GB image pull and the whole platform must run without it per the
+  # keyless-degradation design (Tier 1 absent -> Tier 0 template).
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    profiles: ["local-inference"] # `docker compose --profile local-inference up`
+
+  decision-service:
+    build:
+      context: ..
+      dockerfile: distributed/decision_service/Dockerfile
+    environment:
+      # decision_service/main.py's audit sink is SQLite by default (audit.py);
+      # a Postgres-backed AuditSink implementation is the production wiring
+      # point noted in that file's docstring, not yet built here.
+      PORT: "8100"
+    ports:
+      - "8100:8100"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
+  ollama_data:

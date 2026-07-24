@@ -1,0 +1,128 @@
+# OpenTelemetry Collector config implementing docs/distributed-architecture.md §6:
+# one spine, tail-sampled by "interestingness" and routed by domain, not sampled
+# uniformly.
+#
+#   Trace class                 Sampling                            Retention  Backend
+#   decision (rule evaluation)  100%                                 7y        exp/rules audit tables (Postgres)
+#   experiment (assignment)     100%                                 2y        warehouse via Kafka
+#   agent (graph runs)          100%                                 90d       MLflow
+#   inference                   10%, but 100% if parent has decision 30d       Tempo/Jaeger
+#   consumer (chat/browse)      1-5%, PII-scrubbed here               14d       Tempo/Jaeger
+#
+# Not deployed or executed in this environment (no live collector) — reviewed
+# config, ready to `docker compose up otel-collector` against
+# distributed/docker-compose.yml.
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  # Scrub PII attributes BEFORE any routing/sampling decision or export — the
+  # architecture doc is explicit that scrubbing happens "upstream of
+  # everything." Attribute names below match what agents/nodes.py, api/main.py,
+  # and future PS5 services would tag on consumer-facing spans.
+  attributes/scrub_pii:
+    actions:
+      - key: user.email
+        action: delete
+      - key: user.phone
+        action: delete
+      - key: user.external_id
+        action: delete
+      - key: consumer.raw_text
+        action: delete
+
+  # Tail sampling: unlike head sampling, this looks at the WHOLE trace (all its
+  # spans) before deciding to keep or drop it, which is what lets us say "keep
+  # 100% of inference spans whose trace also contains a decision span."
+  tail_sampling:
+    decision_wait: 10s
+    policies:
+      - name: keep-all-decision-traces
+        type: string_attribute
+        string_attribute:
+          key: domain
+          values: [decision]
+
+      - name: keep-all-experiment-traces
+        type: string_attribute
+        string_attribute:
+          key: domain
+          values: [experiment]
+
+      - name: keep-all-agent-traces
+        type: string_attribute
+        string_attribute:
+          key: domain
+          values: [agent]
+
+      # "100% when the parent trace contains a decision" — expressed as: if ANY
+      # span in the trace has domain=decision, the tail-sampling decision_wait
+      # window means the inference spans in that same trace are already being
+      # kept by the keep-all-decision-traces policy above (policies within one
+      # trace evaluate as OR, and this is the same trace_id). This policy
+      # covers the remaining, decision-free inference traffic.
+      - name: sample-inference-traces
+        type: and
+        and:
+          and_sub_policy:
+            - name: is-inference
+              type: string_attribute
+              string_attribute:
+                key: domain
+                values: [inference]
+            - name: ten-percent
+              type: probabilistic
+              probabilistic:
+                sampling_percentage: 10
+
+      - name: sample-consumer-traces
+        type: and
+        and:
+          and_sub_policy:
+            - name: is-consumer
+              type: string_attribute
+              string_attribute:
+                key: domain
+                values: [consumer]
+            - name: low-percent
+              type: probabilistic
+              probabilistic:
+                sampling_percentage: 3
+
+  batch:
+    timeout: 5s
+
+exporters:
+  # Decision + experiment traces: durable, long-retention sinks. A real
+  # deployment points these at the Postgres audit tables (via a small bridge
+  # service) and the warehouse ingestion topic, respectively — logging here as
+  # the concrete, inspectable placeholder.
+  logging/decision_and_experiment:
+    verbosity: detailed
+
+  # Jaeger's all-in-one image accepts OTLP natively and ships its own query UI —
+  # no separate storage backend to stand up for a local/demo deployment. Swap
+  # for Tempo + object storage at production scale; the collector-side config
+  # doesn't otherwise change.
+  otlp/jaeger:
+    endpoint: jaeger:4317
+    tls:
+      insecure: true
+
+service:
+  pipelines:
+    traces/decision_and_experiment:
+      receivers: [otlp]
+      processors: [attributes/scrub_pii, tail_sampling, batch]
+      exporters: [logging/decision_and_experiment]
+
+    traces/inference_and_consumer:
+      receivers: [otlp]
+      processors: [attributes/scrub_pii, tail_sampling, batch]
+      exporters: [otlp/jaeger]
