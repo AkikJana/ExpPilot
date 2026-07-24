@@ -62,17 +62,6 @@ class ExperimentConfig(BaseModel):
         return value
 
 
-class DayStats(BaseModel):
-    experiment_id: str
-    day: int
-    control_n: int
-    control_conversions: int
-    treatment_n: int
-    treatment_conversions: int
-    guardrail_control_rate: float
-    guardrail_treatment_rate: float
-
-
 class SegmentDayStats(BaseModel):
     """Per-segment slice of one day's telemetry, for driver diagnostics
     (Objective 6: explain why a variant is winning or underperforming).
@@ -85,6 +74,21 @@ class SegmentDayStats(BaseModel):
     control_conversions: int
     treatment_n: int
     treatment_conversions: int
+
+
+class DayStats(BaseModel):
+    experiment_id: str
+    day: int
+    control_n: int
+    control_conversions: int
+    treatment_n: int
+    treatment_conversions: int
+    guardrail_control_rate: float
+    guardrail_treatment_rate: float
+    # Additive, optional: per-segment breakdown for the same day, unlocking
+    # driver diagnostics (Objective 6). Omitted entirely, POST /monitor's
+    # request body is unchanged from before this field existed.
+    segments: list[SegmentDayStats] = []
 
 
 class StatsResult(BaseModel):

@@ -132,6 +132,28 @@ def seed() -> dict[str, int]:
         conn.close()
 
 
+def ensure_seeded() -> bool:
+    """Idempotently seed the catalog tables if they are empty, creating the
+    schema first if needed. Returns True if a seed was actually performed.
+
+    Callers (api/service.py) call this instead of bare init_db(), so a fresh
+    database -- including a test's temp-directory DB -- is self-sufficient:
+    the recommender, validator, and diagnostics modules all depend on these
+    catalog tables being populated, and a data scientist should not have to
+    remember a separate manual seeding step before the API works.
+    """
+    init_db()
+    conn = get_conn()
+    try:
+        count = conn.execute("SELECT COUNT(*) AS c FROM segments").fetchone()["c"]
+    finally:
+        conn.close()
+    if count == 0:
+        seed()
+        return True
+    return False
+
+
 if __name__ == "__main__":
     for table, count in seed().items():
         print(f"{table}: {count} rows loaded")
