@@ -11,6 +11,7 @@ from api.service import (
     branch_ontology,
     create_experiment,
     get_ontology,
+    get_timeline,
     propose_harness_gitops,
     start_experiment,
 )
@@ -21,8 +22,13 @@ app = FastAPI(title="ExpPilot", version="0.2.0")
 
 class CreateRequest(BaseModel):
     goal: str = Field(min_length=5)
-    baseline_rate: float = Field(default=0.1, gt=0, lt=1)
-    daily_traffic: int = Field(default=2000, gt=0)
+    # None (the default) lets the recommender derive baseline_rate and
+    # daily_traffic from the recommended audience segment's real observed
+    # data instead of guessing 0.1/2000 for every experiment regardless of
+    # audience. An explicit value always overrides the recommendation.
+    baseline_rate: float | None = Field(default=None, gt=0, lt=1)
+    daily_traffic: int | None = Field(default=None, gt=0)
+    segment_key: str | None = None
 
 
 class CopilotRequest(CreateRequest):
@@ -49,7 +55,9 @@ def health() -> dict[str, str]:
 @app.post("/experiments")
 def create(request: CreateRequest) -> dict:
     try:
-        return create_experiment(request.goal, request.baseline_rate, request.daily_traffic)
+        return create_experiment(
+            request.goal, request.baseline_rate, request.daily_traffic, request.segment_key
+        )
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
@@ -99,7 +107,21 @@ def harness_gitops(experiment_id: str, request: GitOpsRequest) -> dict[str, str]
 
 @app.post("/monitor")
 def monitor(day: DayStats) -> dict:
+    """Run one day's decision. `day.segments`, when supplied, unlocks the
+    driver diagnostics behind the business narrative (Objective 6). The
+    request body shape is unchanged from before that field existed --
+    callers that only send the aggregate fields are unaffected."""
     try:
-        return analyze_day(day).model_dump(mode="json")
+        return analyze_day(day, day.segments or None).model_dump(mode="json")
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.get("/experiments/{experiment_id}/timeline")
+def timeline(experiment_id: str) -> dict:
+    """The full day-by-day decision series for continuous monitoring
+    (Objective 5) -- a single POST /monitor call only ever shows one day."""
+    try:
+        return get_timeline(experiment_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
