@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from uuid import uuid4
 
 from agents.llm import hypotheses_for_goal
@@ -180,7 +180,7 @@ def audit_event(node: str, input_data: dict, output_data: dict, thread_id: str |
     try:
         conn.execute(
             "INSERT INTO agent_runs(node, input, output, timestamp, thread_id) VALUES (?, ?, ?, ?, ?)",
-            (node, json.dumps(input_data), json.dumps(output_data), datetime.now(UTC).isoformat(), thread_id),
+            (node, json.dumps(input_data), json.dumps(output_data), datetime.now(timezone.utc).isoformat(), thread_id),
         )
         conn.commit()
     finally:
