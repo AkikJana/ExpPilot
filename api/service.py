@@ -8,11 +8,11 @@ from __future__ import annotations
 
 import json
 
-from agents import graph, tools
-from agents.rag import search_past_experiments
+from agents import graph, memory, tools
+from agents.rag import infer_category, search_past_experiments
 from data.db import get_conn, init_db
 from data.seed import main as seed_main
-from shared.models import ExperimentConfig
+from shared.models import ExperimentConfig, MemoryRecord
 from stats.core import compute_day_stats
 
 MAX_DAYS = 14
@@ -83,6 +83,11 @@ def create_experiment(config: dict, scenario: str = "true_lift", seed: int = 202
             "INSERT OR REPLACE INTO experiments (id, config, status, ground_truth) VALUES (?, ?, ?, ?)",
             (cfg.id, cfg.model_dump_json(), "running", json.dumps(ground_truth)),
         )
+        # Config ids are deterministic (exp_<flag_key>), so a relaunch can land on an id that
+        # already has data. Clear it: an experiment must start at day 1, never resume on top
+        # of a previous run's counts and decisions.
+        conn.execute("DELETE FROM day_stats WHERE experiment_id = ?", (cfg.id,))
+        conn.execute("DELETE FROM decisions WHERE experiment_id = ?", (cfg.id,))
         # Mark the flag in use.
         conn.execute(
             "UPDATE flags SET status = 'in_use', running_experiment_id = ? WHERE key = ?",
@@ -226,7 +231,12 @@ def advance_experiment(experiment_id: str) -> dict:
 
 
 def record_verdict(experiment_id: str, day: int, verdict: str, reason: str | None = None) -> dict:
-    """Persist a human adopt/override verdict on a decision (adoption-rate metric)."""
+    """Persist a human adopt/override verdict on a decision (adoption-rate metric).
+
+    A rejection also closes the learning loop: it writes a lesson to long-term memory so
+    future runs in the same category retrieve it. The lesson is stored verbatim from the
+    human's stated reason — no LLM involved, so the record cannot drift from what was said.
+    """
     conn = get_conn()
     try:
         row = conn.execute(
@@ -244,7 +254,59 @@ def record_verdict(experiment_id: str, day: int, verdict: str, reason: str | Non
         conn.commit()
     finally:
         conn.close()
+
+    if verdict == "rejected":
+        _write_rejection_lesson(experiment_id, decision, reason)
+
     return {"experiment_id": experiment_id, "day": day, "human_verdict": verdict}
+
+
+def _write_rejection_lesson(experiment_id: str, decision: dict, reason: str | None) -> None:
+    """Record why a recommendation was overridden. Best-effort; never breaks the verdict."""
+    try:
+        config, _ = tools.load_config(experiment_id)
+        category = infer_category(f"{config.flag_key} {config.audience_segment}")
+        memory.write(
+            MemoryRecord(
+                id=memory.new_id(),
+                kind="lesson",
+                category=category,
+                content=(
+                    f"Recommendation '{decision.get('action')}' rejected: "
+                    f"{reason or 'no reason given'}"
+                ),
+                source_experiment_id=experiment_id,
+                created_at=memory.now_iso(),
+            )
+        )
+    except Exception:
+        pass
+
+
+def get_audit(experiment_id: str) -> dict:
+    """Full audit trail for one experiment: every decision and every agent run."""
+    conn = get_conn()
+    try:
+        dec_rows = conn.execute(
+            "SELECT day, data FROM decisions WHERE experiment_id = ? ORDER BY day", (experiment_id,)
+        ).fetchall()
+        run_rows = conn.execute(
+            "SELECT node, input, output, timestamp FROM agent_runs "
+            "WHERE thread_id = ? OR input LIKE ? ORDER BY id",
+            (experiment_id, f"%{experiment_id}%"),
+        ).fetchall()
+    finally:
+        conn.close()
+    return {
+        "experiment_id": experiment_id,
+        "decisions": [{"day": r["day"], **json.loads(r["data"])} for r in dec_rows],
+        "agent_runs": [dict(r) for r in run_rows],
+    }
+
+
+def get_memory(kind: str | None = None, category: str | None = None) -> list[dict]:
+    """Long-term memory records, newest first, optionally filtered."""
+    return [r.model_dump() for r in memory.fetch_all(kind=kind, category=category)]
 
 
 def adoption_stats() -> dict:

@@ -105,6 +105,57 @@ def test_decide_guardrail_beats_scale():
     assert decide(stats_result, _sample_config()) == "rollback"
 
 
+def _scale_worthy_stats(day: int, n: int) -> StatsResult:
+    """A StatsResult whose Bayes numbers alone would justify shipping."""
+    return StatsResult(
+        experiment_id="exp_deadbeef",
+        day=day,
+        srm_p_value=0.9,
+        srm_flag=False,
+        z_stat=6.0,
+        p_value=0.0001,
+        lift_abs=0.04,
+        ci_low=0.03,
+        ci_high=0.05,
+        prob_beats_control=0.999,
+        expected_loss_ship=0.0,
+        expected_loss_keep=0.04,
+        guardrail_breach=False,
+        guardrail_margin=0.0,
+        control_n=n,
+        treatment_n=n,
+    )
+
+
+def test_decide_will_not_ship_before_minimum_runtime():
+    """A day-1 landslide must not ship: continuous monitoring inflates false positives."""
+    config = _sample_config()
+    stats_result = _scale_worthy_stats(day=1, n=config.required_n_per_arm * 5)
+    assert decide(stats_result, config) == "continue"
+
+
+def test_decide_will_not_ship_before_required_sample_size():
+    """Past the runtime floor but under the planned per-arm N, the call still waits."""
+    config = _sample_config()
+    stats_result = _scale_worthy_stats(day=10, n=config.required_n_per_arm - 1)
+    assert decide(stats_result, config) == "continue"
+
+
+def test_decide_ships_once_powered_and_past_runtime_floor():
+    """Both gates satisfied and the posterior is decisive — now it ships."""
+    config = _sample_config()
+    stats_result = _scale_worthy_stats(day=10, n=config.required_n_per_arm)
+    assert decide(stats_result, config) == "scale"
+
+
+def test_srm_fires_even_before_the_readiness_gates():
+    """Trust verdicts are not gated: a broken assignment pauses on day 1."""
+    config = _sample_config()
+    stats_result = _scale_worthy_stats(day=1, n=10)
+    stats_result.srm_flag = True
+    assert decide(stats_result, config) == "pause"
+
+
 def test_compute_day_stats_assembles_result():
     from shared.models import DayStats
 

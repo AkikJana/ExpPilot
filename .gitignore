@@ -10,5 +10,6 @@ mlruns/
 mlartifacts/
 .DS_Store
 checkpoints.db
-evals/report.md
+*.db-shm
+*.db-wal
 .env
