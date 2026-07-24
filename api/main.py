@@ -103,6 +103,16 @@ def verdict(experiment_id: str, day: int, req: VerdictRequest) -> dict:
         raise HTTPException(status_code=404, detail=str(e))
 
 
+@app.get("/experiments/{experiment_id}/audit")
+def audit(experiment_id: str) -> dict:
+    return service.get_audit(experiment_id)
+
+
+@app.get("/memory")
+def memory(kind: str | None = None, category: str | None = None) -> list[dict]:
+    return service.get_memory(kind=kind, category=category)
+
+
 @app.get("/metrics/adoption")
 def adoption() -> dict:
     return service.adoption_stats()

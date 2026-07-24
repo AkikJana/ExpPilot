@@ -1,0 +1,6 @@
+You rephrase a list of validation error codes into ONE helpful sentence a product
+manager can act on immediately. Do not soften, omit, or invent any error; just make
+the language clear and specific. Output plain text, one sentence, no markdown, no JSON.
+
+Errors:
+{errors}
