@@ -36,6 +36,16 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest==8.3.4", "build>=1.2"]
+# --- synthgen accelerators (all optional; engine falls back without them) ---
+# Differentiable stats via PyTorch autograd (CPU works; CUDA build enables GPU).
+synthgen-diff = ["torch>=2.2"]
+# Local Gemma 3n E4B generation via Hugging Face pipelines.
+synthgen-local = ["transformers>=4.44", "accelerate>=0.33", "huggingface_hub>=0.24", "safetensors>=0.4"]
+# Provider-agnostic API generation (Groq/OpenAI/Anthropic/Ollama) via LiteLLM.
+synthgen-api = ["litellm>=1.44"]
+# NVIDIA-GPU dataframe acceleration (requires CUDA 12 + NVIDIA GPU).
+# Install from the RAPIDS index: pip install --extra-index-url=https://pypi.nvidia.com "cudf-cu12>=24.10" cupy-cuda12x
+synthgen-gpu = ["cudf-cu12>=24.10", "cupy-cuda12x>=13.0"]
 
 [project.urls]
 Homepage = "https://github.com/AkikJana/ExpPilot"
@@ -46,7 +56,7 @@ exppilot-seed = "data.seed:main"
 exppilot-eval = "evals.harness:run"
 
 [tool.setuptools]
-packages = ["agents", "api", "data", "evals", "shared", "stats", "ui"]
+packages = ["agents", "api", "data", "evals", "shared", "stats", "synthgen", "ui"]
 
 [tool.setuptools.package-data]
 "*" = ["*.md"]

@@ -13,19 +13,60 @@ from __future__ import annotations
 import os
 import re
 
-_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-3-5-sonnet-latest")
+_ANTHROPIC_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-3-5-sonnet-latest")
+_GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
 _NUMERIC_TOLERANCE = 0.02  # relative tolerance when checking narrated numbers
 
 
+def _provider() -> str | None:
+    """Which LLM backend to use, based on which API key is present (Groq preferred)."""
+    if os.getenv("GROQ_API_KEY"):
+        return "groq"
+    if os.getenv("ANTHROPIC_API_KEY"):
+        return "anthropic"
+    return None
+
+
+def active_provider() -> str:
+    """Human-readable provider label for the UI."""
+    p = _provider()
+    if p == "groq":
+        return f"Groq ({_GROQ_MODEL})"
+    if p == "anthropic":
+        return f"Anthropic ({_ANTHROPIC_MODEL})"
+    return "offline (deterministic templates)"
+
+
 def llm_available() -> bool:
-    """True only if a key is present AND the langchain client imports cleanly."""
-    if not os.getenv("ANTHROPIC_API_KEY"):
-        return False
-    try:
-        import langchain_anthropic  # noqa: F401
-    except Exception:
-        return False
-    return True
+    """True only if a key is present AND the matching langchain client imports cleanly."""
+    p = _provider()
+    if p == "groq":
+        try:
+            import langchain_groq  # noqa: F401
+        except Exception:
+            return False
+        return True
+    if p == "anthropic":
+        try:
+            import langchain_anthropic  # noqa: F401
+        except Exception:
+            return False
+        return True
+    return False
+
+
+def _build_model():
+    """Instantiate the chat model for the active provider (or None if unavailable)."""
+    p = _provider()
+    if p == "groq":
+        from langchain_groq import ChatGroq
+
+        return ChatGroq(model=_GROQ_MODEL, temperature=0.2, max_tokens=400)
+    if p == "anthropic":
+        from langchain_anthropic import ChatAnthropic
+
+        return ChatAnthropic(model=_ANTHROPIC_MODEL, temperature=0.2, max_tokens=400)
+    return None
 
 
 def _extract_numbers(text: str) -> list[float]:
@@ -70,10 +111,11 @@ def narrate(system: str, prompt: str, allowed_values: list[float], fallback: str
     if not llm_available():
         return fallback, "template"
     try:
-        from langchain_anthropic import ChatAnthropic
         from langchain_core.messages import HumanMessage, SystemMessage
 
-        model = ChatAnthropic(model=_MODEL, temperature=0.2, max_tokens=400)
+        model = _build_model()
+        if model is None:
+            return fallback, "template"
         resp = model.invoke([SystemMessage(content=system), HumanMessage(content=prompt)])
         text = (resp.content if isinstance(resp.content, str) else str(resp.content)).strip()
         if text and verify_numbers(text, allowed_values):

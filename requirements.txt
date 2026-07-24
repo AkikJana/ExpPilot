@@ -5,8 +5,10 @@ langgraph>=0.2.60
 langgraph-checkpoint-sqlite>=2.0.1
 langchain>=0.3.14
 langchain-anthropic>=0.3.3
+langchain-groq>=0.2.0
 langchain-core>=0.3.29
 numpy==2.2.1
+pandas==2.2.3
 scipy==1.14.1
 statsmodels==0.14.4
 mlflow==2.19.0

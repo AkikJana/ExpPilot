@@ -1,0 +1,36 @@
+# Optional accelerators for the synthgen engine.
+# The engine runs on the core deps (numpy + pandas already available) with a
+# deterministic template backend. Install any subset below to light up more of it.
+# Nothing here is required on a CPU-only, GPU-less machine.
+
+# ---------------------------------------------------------------------------
+# 1) Differentiable statistics (PyTorch autograd). CPU wheel works everywhere;
+#    for GPU autograd install the matching CUDA build from pytorch.org.
+#    pip install -r requirements-synthgen.txt  (or: pip install .[synthgen-diff])
+# ---------------------------------------------------------------------------
+torch>=2.2
+
+# ---------------------------------------------------------------------------
+# 2) Local Gemma 3n E4B generation via Hugging Face pipelines.
+#    Model weights (~several GB) download on first use; needs disk + ideally a GPU.
+#    (Google's LiteRT / AI Edge runtime can serve the same model on-device.)
+# ---------------------------------------------------------------------------
+transformers>=4.44
+accelerate>=0.33
+huggingface_hub>=0.24
+safetensors>=0.4
+
+# ---------------------------------------------------------------------------
+# 3) Provider-agnostic API generation (Groq / OpenAI / Anthropic / Ollama).
+# ---------------------------------------------------------------------------
+litellm>=1.44
+
+# ---------------------------------------------------------------------------
+# 4) NVIDIA-GPU dataframe + array acceleration (CUDA 12 + NVIDIA GPU REQUIRED).
+#    Install from the RAPIDS index, e.g.:
+#      pip install --extra-index-url=https://pypi.nvidia.com "cudf-cu12>=24.10" "cupy-cuda12x>=13.0"
+#    (left commented so a plain `pip install -r` on a CPU box won't fail)
+# ---------------------------------------------------------------------------
+# --extra-index-url=https://pypi.nvidia.com
+# cudf-cu12>=24.10
+# cupy-cuda12x>=13.0

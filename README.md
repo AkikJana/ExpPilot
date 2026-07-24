@@ -84,9 +84,56 @@ falls back to a sequential runner and MLflow logging is best-effort.
 4. `P(beats control) ≤ 0.05` → **STOP**
 5. otherwise → **CONTINUE**
 
+## Synthetic data engine (`synthgen`)
+
+An LLM-driven, GPU-aware, differentiable synthetic-experiment generator. It designs
+a scenario with a switchable LLM backend, simulates thousands–millions of row-level
+observations, and computes statistics with differentiable programming — degrading
+gracefully so it runs anywhere.
+
+**Pipeline:** business goal → LLM drafts a typed `ScenarioSpec` → vectorized simulator
+generates per-user rows → differentiable stats (power + gradients, observed z-test) →
+optionally bridged to ExpPilot `DayStats` to feed the copilot.
+
+**Switchable, self-detecting backends** (`SYNTHGEN_PROVIDER=auto|local|api|template`):
+
+| Layer | Accelerated path | Fallback (works today, no GPU) |
+|-------|------------------|--------------------------------|
+| Generation | Local **Gemma 3n E4B** via Hugging Face pipelines (LiteRT-ready) or any API model | deterministic template |
+| Dataframe | **cuDF** (`cudf.pandas`) on NVIDIA GPU | pandas |
+| Arrays | **cupy** on GPU | numpy (vectorized) |
+| Statistics | **PyTorch autograd** (GPU-ready) | numpy central-difference gradients |
+
+Everything is capability-detected at runtime — no code changes needed to move
+from a laptop to a GPU box or Colab.
+
+```bash
+# capability report (what will actually run on this machine)
+python -m synthgen --capabilities
+
+# generate + simulate + analyze a scenario (CPU/template path)
+python -m synthgen "Increase checkout conversion on the mobile app" --rows 30000
+
+# enable accelerators on a GPU machine (all optional):
+pip install ".[synthgen-diff]"     # torch autograd
+pip install ".[synthgen-local]"    # local Gemma via transformers
+pip install ".[synthgen-api]"      # litellm (provider-agnostic API)
+pip install --extra-index-url=https://pypi.nvidia.com ".[synthgen-gpu]"  # cuDF + cupy
+```
+
+```python
+from synthgen import SyntheticDataEngine, SynthGenConfig
+eng = SyntheticDataEngine(SynthGenConfig(provider="auto"))
+result = eng.run("Reduce churn for prepaid users")
+days = eng.to_daystats(result.spec, result.sim, "exp_synth")  # feed the copilot
+```
+
+Measured on this CPU-only box: ~1.4M simulated rows/sec (numpy + pandas).
+
 ## Tests
 
 ```bash
-pytest -q          # stats core unit tests
-python scripts/smoke.py   # end-to-end lifecycle + eval smoke test
+pytest -q                       # stats core unit tests
+pytest synthgen/test_synthgen.py -q   # synthetic-data engine tests
+python scripts/smoke.py         # end-to-end lifecycle + eval smoke test
 ```

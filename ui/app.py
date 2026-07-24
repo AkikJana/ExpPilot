@@ -13,11 +13,22 @@ _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
+import os
+
 import pandas as pd
 import streamlit as st
 
+# On hosted Streamlit, secrets live in st.secrets; mirror them into the environment
+# so modules that read os.getenv (e.g. agents.llm -> GROQ_API_KEY) work unchanged.
+try:
+    for _k, _v in dict(st.secrets).items():
+        if isinstance(_v, str):
+            os.environ.setdefault(_k, _v)
+except Exception:
+    pass
+
 from api import service
-from agents.llm import llm_available
+from agents.llm import active_provider, llm_available
 from data.synth import SCENARIOS
 from evals import harness
 
@@ -69,7 +80,7 @@ def page_create() -> None:
             ss.proposals += len(ss.hyp_result["hypotheses"])
     with c2:
         st.caption(
-            f"LLM narration: {'ON (Anthropic)' if llm_available() else 'OFFLINE — deterministic templates'} · "
+            f"LLM narration: {active_provider()} · "
             "every number is computed by the stats engine, never the LLM."
         )
 
