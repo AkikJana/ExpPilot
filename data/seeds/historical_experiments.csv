@@ -1,0 +1,36 @@
+id,category,segment_key,primary_metric,hypothesis_text,lift_observed,outcome,concluded_at
+hist_ck001,checkout,mobile_users,conversion_rate,One-page checkout reduces mobile drop-off vs a 3-step flow,0.031,shipped,2025-11-02
+hist_ck002,checkout,new_users,conversion_rate,Guest checkout lifts conversion for first-time mobile users,0.024,shipped,2025-11-18
+hist_ck003,checkout,returning_users,checkout_completion_rate,Defaulting to the last-used saved card reduces abandonment,0.012,shipped,2025-12-01
+hist_ck004,checkout,mobile_users,checkout_completion_rate,A step progress indicator improves checkout completion,0.004,abandoned,2025-12-09
+hist_ck005,checkout,all_users,conversion_rate,Removing the coupon field from checkout increases conversion,-0.008,rolled_back,2025-12-14
+hist_ck006,checkout,mobile_users,conversion_rate,Wallet express-pay above the fold lifts mobile checkout conversion,0.028,shipped,2026-01-06
+hist_ck007,checkout,all_users,conversion_rate,Showing all fees before payment increases trust and conversion,0.009,shipped,2026-01-20
+hist_cart001,cart,cart_abandoners,add_to_cart_rate,An in-session nudge before cart abandonment recovers intent,0.041,shipped,2025-10-22
+hist_cart002,cart,device_upgrade_eligible,arpu,Bundle suggestion at cart step increases average order value,0.017,shipped,2025-11-05
+hist_bn001,bundles,device_upgrade_eligible,conversion_rate,Bundle nudge banner on home lifts device upgrade click-through,0.019,shipped,2025-10-14
+hist_bn002,bundles,all_users,add_to_cart_rate,A redesigned bundle carousel increases add-to-cart rate,0.015,shipped,2025-10-29
+hist_bn003,bundles,device_upgrade_eligible,conversion_rate,A percentage-saved badge on bundles increases conversion,0.021,shipped,2025-11-11
+hist_bn004,bundles,device_upgrade_eligible,arpu,Auto-recommending a bundle at cart increases average order value,0.006,abandoned,2025-11-27
+hist_bn005,bundles,device_upgrade_eligible,conversion_rate,A countdown timer on bundle offers increases urgency conversion,-0.011,rolled_back,2025-12-03
+hist_pu001,plan_upgrades,plan_browsers,plan_upgrade_rate,A simplified plan comparison table increases upgrade rate,0.017,shipped,2025-09-30
+hist_pu002,plan_upgrades,plan_browsers,plan_upgrade_rate,Paywall copy emphasising savings increases upgrade conversion,0.022,shipped,2025-10-16
+hist_pu003,plan_upgrades,plan_browsers,plan_upgrade_rate,A progress bar toward the next plan tier increases upgrades,0.009,abandoned,2025-10-24
+hist_pu004,plan_upgrades,plan_browsers,plan_upgrade_rate,Social proof messaging increases plan upgrade rate,0.014,shipped,2025-11-08
+hist_pu005,plan_upgrades,postpaid_users,plan_upgrade_rate,An aggressive upsell modal on login increases upgrades short-term,0.026,rolled_back,2025-11-22
+hist_ch001,churn,at_risk_users,retention_d30,A personalised save offer at cancellation reduces churn,0.033,shipped,2025-09-12
+hist_ch002,churn,at_risk_users,retention_d30,Moving the retention offer from day 7 to day 3 reduces churn,0.018,shipped,2025-09-28
+hist_ch003,churn,at_risk_users,retention_d30,A win-back email with a discount CTA improves reactivation,0.011,shipped,2025-10-10
+hist_ch004,churn,at_risk_users,retention_d30,A retention discount banner on the billing page reduces churn,0.003,abandoned,2025-10-19
+hist_ch005,churn,at_risk_users,retention_d30,An exit-survey gate before cancellation reduces completed churn,-0.014,rolled_back,2025-10-27
+hist_on001,onboarding,new_users,retention_d30,A three-step onboarding flow increases activation vs six steps,0.029,shipped,2025-08-18
+hist_on002,onboarding,new_users,retention_d30,Progressive profiling reduces signup abandonment,0.016,shipped,2025-09-02
+hist_on003,onboarding,new_users,retention_d30,A gamified onboarding checklist increases feature adoption,0.008,abandoned,2025-09-15
+hist_on004,onboarding,new_users,retention_d30,A mandatory tutorial before app access reduces day-1 retention,-0.019,rolled_back,2025-09-24
+hist_pm001,payments,postpaid_users,conversion_rate,An autopay nudge at the billing screen increases enrolment,0.041,shipped,2025-08-05
+hist_pm002,payments,returning_users,conversion_rate,Saved card as the default payment increases repeat purchase rate,0.020,shipped,2025-08-21
+hist_pm003,payments,all_users,checkout_completion_rate,An extra payment confirmation step reduces failed transactions,0.007,abandoned,2025-09-04
+hist_ly001,loyalty,high_value_users,retention_d30,Showing loyalty points in the header increases return visits,0.013,shipped,2025-07-22
+hist_ly002,loyalty,returning_users,conversion_rate,A double-sided referral incentive increases referral conversion,0.025,shipped,2025-08-09
+hist_dc001,discovery,desktop_users,add_to_cart_rate,Improved autocomplete ranking increases search-to-cart rate,0.012,shipped,2025-07-08
+hist_dc002,discovery,all_users,add_to_cart_rate,Personalised PDP recommendations increase add-to-cart rate,0.018,shipped,2025-07-30

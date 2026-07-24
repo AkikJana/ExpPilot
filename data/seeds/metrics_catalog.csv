@@ -1,0 +1,14 @@
+metric_key,display_name,kind,direction,unit,baseline_value,description
+conversion_rate,Conversion rate,primary,increase_good,rate,0.0910,Share of sessions completing the target purchase
+checkout_completion_rate,Checkout completion rate,primary,increase_good,rate,0.6420,Share of started checkouts that complete
+plan_upgrade_rate,Plan upgrade rate,primary,increase_good,rate,0.0340,Share of eligible users upgrading their plan
+add_to_cart_rate,Add-to-cart rate,primary,increase_good,rate,0.1870,Share of sessions adding at least one item
+retention_d30,30-day retention,primary,increase_good,rate,0.7210,Share of users active 30 days after signup
+arpu,Average revenue per user,primary,increase_good,currency,41.20,Trailing 30-day revenue divided by active users
+error_rate,Client error rate,guardrail,decrease_good,rate,0.0089,Share of sessions with a blocking client error
+latency_p95_ms,p95 page latency,guardrail,decrease_good,milliseconds,1840.00,95th percentile end-to-end page load time
+crash_free_rate,Crash-free session rate,guardrail,increase_good,rate,0.9963,Share of app sessions with no crash
+support_contact_rate,Support contact rate,guardrail,decrease_good,rate,0.0212,Share of sessions followed by a support contact
+refund_rate,Refund rate,guardrail,decrease_good,rate,0.0148,Share of orders refunded within 30 days
+unsubscribe_rate,Unsubscribe rate,guardrail,decrease_good,rate,0.0067,Share of users opting out of communications
+checkout_abandon_rate,Checkout abandon rate,guardrail,decrease_good,rate,0.3580,Share of started checkouts abandoned

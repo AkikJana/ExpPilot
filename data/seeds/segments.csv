@@ -1,0 +1,13 @@
+segment_key,display_name,population,daily_traffic,baseline_conversion_rate,description
+all_users,All users,4200000,42000,0.0910,Unsegmented traffic across web and app
+mobile_users,Mobile app users,1850000,21500,0.0840,Native iOS/Android app sessions
+desktop_users,Desktop web users,1240000,12800,0.1090,Desktop browser sessions
+new_users,New users (< 30 days),320000,6400,0.0520,Accounts created within the last 30 days
+returning_users,Returning users,2900000,29000,0.1020,Accounts with 2+ prior sessions
+prepaid_users,Prepaid subscribers,980000,9100,0.0730,Pay-as-you-go plan holders
+postpaid_users,Postpaid subscribers,1420000,13600,0.1180,Monthly contract plan holders
+high_value_users,High-value users (top decile ARPU),210000,3200,0.1640,Top 10% by trailing 90-day revenue
+at_risk_users,At-risk of churn,145000,2100,0.0410,Predicted churn probability above 0.6
+cart_abandoners,Cart abandoners (7d),265000,4800,0.0670,Added to cart without purchase in last 7 days
+device_upgrade_eligible,Device upgrade eligible,410000,5200,0.0960,Contract term allows a subsidised device upgrade
+plan_browsers,Plan comparison browsers,190000,3600,0.0880,Viewed plan comparison page in last 14 days

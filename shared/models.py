@@ -73,6 +73,20 @@ class DayStats(BaseModel):
     guardrail_treatment_rate: float
 
 
+class SegmentDayStats(BaseModel):
+    """Per-segment slice of one day's telemetry, for driver diagnostics
+    (Objective 6: explain why a variant is winning or underperforming).
+    Optional alongside the aggregate DayStats — nothing requires it."""
+
+    experiment_id: str
+    day: int
+    segment_key: str
+    control_n: int
+    control_conversions: int
+    treatment_n: int
+    treatment_conversions: int
+
+
 class StatsResult(BaseModel):
     experiment_id: str
     day: int

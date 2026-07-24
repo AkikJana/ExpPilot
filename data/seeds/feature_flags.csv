@@ -1,0 +1,26 @@
+flag_key,segment_key,status,owner,category,description
+checkout_one_page,mobile_users,free,checkout-squad,checkout,Collapse the 3-step mobile checkout into a single page
+checkout_guest_mode,new_users,free,checkout-squad,checkout,Allow purchase without account creation
+checkout_saved_cards,returning_users,free,payments-squad,payments,Default to the most recently used saved card
+checkout_fee_transparency,all_users,free,checkout-squad,checkout,Show all fees before the payment step
+checkout_progress_bar,mobile_users,free,checkout-squad,checkout,Add a step indicator to the checkout flow
+checkout_express_pay,mobile_users,in_use,payments-squad,payments,Surface wallet express-pay above the fold
+cart_recovery_nudge,cart_abandoners,free,growth-squad,cart,In-session nudge when a cart is about to be abandoned
+cart_bundle_suggest,device_upgrade_eligible,free,growth-squad,bundles,Suggest an accessory bundle at the cart step
+bundle_pricing_badge,device_upgrade_eligible,free,growth-squad,bundles,Show a percentage-saved badge on bundle offers
+bundle_carousel_v2,all_users,free,growth-squad,bundles,Redesigned bundle carousel on the home surface
+plan_comparison_table,plan_browsers,free,plans-squad,plan_upgrades,Simplified side-by-side plan comparison table
+plan_upgrade_paywall_copy,plan_browsers,free,plans-squad,plan_upgrades,Reframe upgrade paywall copy around savings
+plan_social_proof,plan_browsers,free,plans-squad,plan_upgrades,Show adoption statistics on the upgrade page
+plan_usage_insight,postpaid_users,in_use,plans-squad,plan_upgrades,Show personalised usage vs plan-limit insight
+churn_save_offer,at_risk_users,free,retention-squad,churn,Present a targeted save offer at cancellation
+churn_offer_timing,at_risk_users,free,retention-squad,churn,Move the retention offer from day 7 to day 3
+churn_winback_email,at_risk_users,free,retention-squad,churn,Win-back email sequence with a discount CTA
+onboarding_short_flow,new_users,free,onboarding-squad,onboarding,Reduce onboarding from six steps to three
+onboarding_progressive,new_users,free,onboarding-squad,onboarding,Collect profile fields progressively after activation
+payments_autopay_nudge,postpaid_users,free,payments-squad,payments,Prompt autopay enrolment on the billing screen
+prepaid_recharge_reminder,prepaid_users,free,retention-squad,churn,Reminder before prepaid balance expiry
+loyalty_points_banner,high_value_users,free,growth-squad,loyalty,Show loyalty points balance in the header
+referral_incentive,returning_users,free,growth-squad,loyalty,Double-sided referral incentive banner
+search_autocomplete_v2,desktop_users,free,discovery-squad,discovery,Improved autocomplete ranking on desktop search
+pdp_recommendations,all_users,free,discovery-squad,discovery,Personalised recommendations on product pages
