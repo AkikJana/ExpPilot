@@ -15,6 +15,7 @@ from shared.models import (
     EXPECTED_LOSS_EPSILON,
     GUARDRAIL_MARGIN,
     KILL_PROB_THRESHOLD,
+    MIN_RUNTIME_DAYS,
     SHIP_PROB_THRESHOLD,
     SRM_ALPHA,
     ExperimentConfig,
@@ -89,16 +90,36 @@ def guardrail_check(c_rate: float, t_rate: float, margin: float = GUARDRAIL_MARG
 
 
 def decide(stats: StatsResult, config: ExperimentConfig) -> str:
-    """THE decision function. Deterministic, precedence-ordered, LLM-free."""
+    """THE decision function. Deterministic, precedence-ordered, LLM-free.
+
+    Trust/safety verdicts (SRM, guardrail) fire immediately at any sample size — a broken
+    assignment or a harmed guardrail is not something to keep running. Ship/kill verdicts
+    are gated behind the readiness check below.
+    """
     if stats.srm_flag:
         return "pause"
     if stats.guardrail_breach:
         return "rollback"
+    if not _ready_to_call(stats, config):
+        return "continue"
     if stats.prob_beats_control >= SHIP_PROB_THRESHOLD and stats.expected_loss_ship <= EXPECTED_LOSS_EPSILON:
         return "scale"
     if stats.prob_beats_control <= KILL_PROB_THRESHOLD:
         return "stop"
     return "continue"
+
+
+def _ready_to_call(stats: StatsResult, config: ExperimentConfig) -> bool:
+    """True once the experiment is powered and has run a full weekly cycle.
+
+    Continuous monitoring inflates false positives: a real lift crosses the 0.95 posterior
+    threshold within hours, long before an SRM, a novelty effect, or a weekday/weekend
+    swing could reveal itself. Requiring both the planned per-arm sample size and
+    MIN_RUNTIME_DAYS is the standard peeking guard.
+    """
+    if stats.day < MIN_RUNTIME_DAYS:
+        return False
+    return min(stats.control_n, stats.treatment_n) >= config.required_n_per_arm
 
 
 def compute_day_stats(cumulative: DayStats, config: ExperimentConfig, seed: int = 0) -> StatsResult:
@@ -135,4 +156,6 @@ def compute_day_stats(cumulative: DayStats, config: ExperimentConfig, seed: int 
         expected_loss_keep=bayes["expected_loss_keep"],
         guardrail_breach=guardrail_breach,
         guardrail_margin=guardrail_margin,
+        control_n=cumulative.control_n,
+        treatment_n=cumulative.treatment_n,
     )

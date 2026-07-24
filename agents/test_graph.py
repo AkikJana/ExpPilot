@@ -21,12 +21,19 @@ def _ensure_schema():
 
 
 def _seed_running_experiment(exp_id: str, scenario: str, seed: int, n_days: int) -> dict:
-    """Insert a synthetic experiment's config and first n_days of DayStats rows."""
+    """Insert a synthetic experiment's config and first n_days of DayStats rows.
+
+    Clears any prior rows for this id first: the SQLite file persists between pytest runs,
+    so without this the memory/decision assertions would accumulate across invocations.
+    """
     config, day_stats, ground_truth = make_experiment(scenario, seed)
     config_dict = config.model_dump()
     config_dict["id"] = exp_id
 
     conn = get_conn()
+    conn.execute("DELETE FROM memory WHERE source_experiment_id = ?", (exp_id,))
+    conn.execute("DELETE FROM decisions WHERE experiment_id = ?", (exp_id,))
+    conn.execute("DELETE FROM day_stats WHERE experiment_id = ?", (exp_id,))
     conn.execute(
         "INSERT OR REPLACE INTO experiments (id, config, status, ground_truth) VALUES (?, ?, ?, ?)",
         (exp_id, json.dumps(config_dict), "running", json.dumps(ground_truth)),

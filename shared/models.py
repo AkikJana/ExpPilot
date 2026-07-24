@@ -11,6 +11,11 @@ KILL_PROB_THRESHOLD = 0.05
 EXPECTED_LOSS_EPSILON = 0.0025
 GUARDRAIL_MARGIN = 0.01
 
+# A ship/kill call is only valid once the experiment is actually powered and has covered a
+# full weekly cycle. Without these, a large lift crosses P(beats control) >= 0.95 on day 1
+# and the copilot ships before an SRM or a novelty effect could ever surface.
+MIN_RUNTIME_DAYS = 7
+
 
 class Hypothesis(BaseModel):
     """A falsifiable, LLM-proposed hypothesis grounded in a business goal."""
@@ -92,6 +97,8 @@ class StatsResult(BaseModel):
     expected_loss_keep: float
     guardrail_breach: bool
     guardrail_margin: float
+    control_n: int = 0
+    treatment_n: int = 0
 
 
 class Alert(BaseModel):
