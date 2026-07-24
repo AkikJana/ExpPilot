@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.pyc
+*.db
+*.db-journal
+mlruns/
+mlartifacts/
+.DS_Store
+checkpoints.db
+evals/report.md
+.env
