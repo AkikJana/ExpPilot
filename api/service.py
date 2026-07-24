@@ -1,4 +1,12 @@
-"""Application service: deterministic decisioning with Cursor-assisted ideation."""
+"""Application service: deterministic decisioning with Cursor-assisted ideation.
+
+Recommendations (which flag, audience, and metrics), validation, and driver
+diagnostics are all deterministic and grounded in the SQL data layer
+(agents/recommender.py, agents/validator.py, stats/diagnostics.py) -- Cursor
+never chooses a flag, computes a statistic, or invents a number here. Its only
+role is prose: hypothesis statements (agents/llm.py) and the business
+narrative (agents/narrator.py), and both are numerically guarded.
+"""
 
 from __future__ import annotations
 
@@ -7,11 +15,16 @@ from datetime import UTC, datetime
 from uuid import uuid4
 
 from agents.llm import hypotheses_for_goal
+from agents.narrator import narrate_decision
+from agents.recommender import find_precedents, infer_category, recommend
+from agents.validator import validate_experiment
 from data.db import get_conn, init_db
+from data.seed import ensure_seeded
 from harness.gitops import gitops_proposal
 from ontology.tree import initial_tree
-from shared.models import DayStats, Decision, ExperimentConfig, Hypothesis
+from shared.models import DayStats, Decision, ExperimentConfig, Hypothesis, SegmentDayStats
 from stats.core import compute_day_stats, decide, power_analysis
+from stats.diagnostics import analyze_drivers
 
 
 def _dump(model: object) -> dict:
@@ -29,11 +42,35 @@ def _load_experiment(experiment_id: str) -> ExperimentConfig:
     return ExperimentConfig.model_validate_json(row["config"])
 
 
-def create_experiment(goal: str, baseline_rate: float = 0.1, daily_traffic: int = 2000) -> dict:
-    """Create a proposal; traffic math and validation remain deterministic."""
-    init_db()
-    candidates = hypotheses_for_goal(goal)
+def create_experiment(
+    goal: str,
+    baseline_rate: float | None = None,
+    daily_traffic: int | None = None,
+    segment_key: str | None = None,
+) -> dict:
+    """Create a proposal grounded in real flags, audiences, metrics, and
+    historical precedents.
+
+    baseline_rate and daily_traffic, when omitted, are derived from the
+    recommended audience segment's actual observed traffic and conversion
+    rate rather than guessed. Passing explicit values (as the existing test
+    suite does) always takes precedence over the data-driven default.
+    """
+    ensure_seeded()
+    category = infer_category(goal)
+    precedents = find_precedents(category, segment_key, limit=5)
+    candidates = hypotheses_for_goal(goal, precedents=precedents)
     candidate = candidates[0]
+
+    recommendation = recommend(goal, preferred_segment=segment_key or candidate.get("segment"))
+
+    resolved_baseline_rate = (
+        baseline_rate if baseline_rate is not None else recommendation.segment["baseline_conversion_rate"]
+    )
+    resolved_daily_traffic = (
+        daily_traffic if daily_traffic is not None else recommendation.segment["daily_traffic"]
+    )
+
     hypothesis = Hypothesis(
         id=f"hyp_{uuid4().hex[:10]}",
         goal=goal,
@@ -41,35 +78,37 @@ def create_experiment(goal: str, baseline_rate: float = 0.1, daily_traffic: int 
         primary_metric="conversion_rate",
         expected_direction=candidate.get("direction", "increase"),
         expected_mde=float(candidate.get("expected_mde", 0.01)),
-        segment=candidate.get("segment", "all_users"),
+        segment=recommendation.segment["segment_key"],
         rationale=candidate.get("rationale", ""),
-        precedent_ids=[],
+        precedent_ids=[precedent["id"] for precedent in recommendation.precedents],
     )
-    required_n = power_analysis(baseline_rate, hypothesis.expected_mde)
+    required_n = power_analysis(resolved_baseline_rate, hypothesis.expected_mde)
     experiment_id = f"exp_{uuid4().hex[:10]}"
+    flag_key = recommendation.flag["flag_key"] if recommendation.flag else f"{experiment_id}_flag"
+    guardrail_keys = [metric["metric_key"] for metric in recommendation.guardrail_metrics] or ["error_rate"]
+
     config = ExperimentConfig(
         id=experiment_id,
         hypothesis_id=hypothesis.id,
-        flag_key=f"{experiment_id}_flag",
+        flag_key=flag_key,
         audience_segment=hypothesis.segment,
         traffic_split={"control": 0.5, "treatment": 0.5},
-        baseline_rate=baseline_rate,
+        baseline_rate=resolved_baseline_rate,
         mde=hypothesis.expected_mde,
         required_n_per_arm=required_n,
-        estimated_days=max(1, round((2 * required_n) / daily_traffic)),
-        guardrail_metrics=["error_rate"],
-        daily_traffic=daily_traffic,
+        estimated_days=max(1, round((2 * required_n) / resolved_daily_traffic)),
+        guardrail_metrics=guardrail_keys,
+        daily_traffic=resolved_daily_traffic,
         status="validated",
     )
+
+    validation = validate_experiment(config, primary_metric_key=recommendation.primary_metric["metric_key"])
+    if not validation.passed:
+        raise ValueError("; ".join(issue.message for issue in validation.blocking))
+
     tree = initial_tree(goal, candidates)
     conn = get_conn()
     try:
-        conflict = conn.execute(
-            "SELECT running_experiment_id FROM flags WHERE segment = ? AND status = 'running'",
-            (config.audience_segment,),
-        ).fetchone()
-        if conflict:
-            raise ValueError(f"Audience overlaps with live experiment {conflict['running_experiment_id']}")
         conn.execute(
             "INSERT INTO experiments(id, config, status, ground_truth) VALUES (?, ?, ?, ?)",
             (config.id, config.model_dump_json(), config.status, json.dumps({"ontology": tree.as_dict()})),
@@ -78,10 +117,28 @@ def create_experiment(goal: str, baseline_rate: float = 0.1, daily_traffic: int 
             "INSERT OR REPLACE INTO flags(key, segment, status, running_experiment_id) VALUES (?, ?, ?, ?)",
             (config.flag_key, config.audience_segment, "validated", None),
         )
+        # Keep the rich flag catalog in sync: a flag claimed by a draft/validated
+        # experiment should not be recommended again for a different one. This
+        # is a no-op UPDATE if flag_key is a synthetic fallback key not in the
+        # catalog (recommendation.flag was None).
+        conn.execute("UPDATE feature_flags SET status = 'validated' WHERE flag_key = ?", (config.flag_key,))
         conn.commit()
     finally:
         conn.close()
-    return {"hypotheses": candidates, "hypothesis": _dump(hypothesis), "config": _dump(config), "ontology": tree.as_dict()}
+    return {
+        "hypotheses": candidates,
+        "hypothesis": _dump(hypothesis),
+        "config": _dump(config),
+        "ontology": tree.as_dict(),
+        "recommendation": {
+            "category": recommendation.category,
+            "precedents": recommendation.precedents,
+            "primary_metric": recommendation.primary_metric,
+            "guardrail_metrics": recommendation.guardrail_metrics,
+            "issues": recommendation.issues,
+        },
+        "validation": validation.as_dict(),
+    }
 
 
 def start_experiment(experiment_id: str) -> ExperimentConfig:
@@ -89,24 +146,38 @@ def start_experiment(experiment_id: str) -> ExperimentConfig:
     config.status = "running"
     conn = get_conn()
     try:
-        conn.execute("UPDATE experiments SET config = ?, status = ? WHERE id = ?", (config.model_dump_json(), "running", experiment_id))
-        conn.execute("UPDATE flags SET status = 'running', running_experiment_id = ? WHERE key = ?", (experiment_id, config.flag_key))
+        conn.execute(
+            "UPDATE experiments SET config = ?, status = ? WHERE id = ?",
+            (config.model_dump_json(), "running", experiment_id),
+        )
+        conn.execute(
+            "UPDATE flags SET status = 'running', running_experiment_id = ? WHERE key = ?",
+            (experiment_id, config.flag_key),
+        )
+        conn.execute("UPDATE feature_flags SET status = 'running' WHERE flag_key = ?", (config.flag_key,))
         conn.commit()
     finally:
         conn.close()
     return config
 
 
-def analyze_day(day: DayStats) -> Decision:
+def analyze_day(day: DayStats, segments: list[SegmentDayStats] | None = None) -> Decision:
+    """Compute the deterministic decision for one day, then narrate it in
+    business language. `segments`, when given, unlocks the driver diagnostics
+    (Objective 6): the narrative can then say which audience is driving or
+    dragging the result instead of only reporting the aggregate number.
+    """
     config = _load_experiment(day.experiment_id)
     result = compute_day_stats(day, config, seed=day.day)
     action = decide(result, config)
     confidence = result.prob_beats_control if action == "scale" else 1 - result.prob_beats_control
-    narrative = (
-        f"Deterministic decision: {action.upper()}. "
-        f"Day {day.day}; absolute lift {result.lift_abs:.2%}; "
-        f"SRM p-value {result.srm_p_value:.4f}."
-    )
+
+    driver_analysis = None
+    if segments:
+        driver_analysis = analyze_drivers(result.lift_abs, segments)
+
+    narrative, narrative_source = narrate_decision(action, result, driver_analysis)
+
     decision = Decision(
         experiment_id=day.experiment_id,
         day=day.day,
@@ -120,12 +191,70 @@ def analyze_day(day: DayStats) -> Decision:
     )
     conn = get_conn()
     try:
-        conn.execute("INSERT OR REPLACE INTO day_stats(experiment_id, day, data) VALUES (?, ?, ?)", (day.experiment_id, day.day, day.model_dump_json()))
-        conn.execute("INSERT OR REPLACE INTO decisions(experiment_id, day, data) VALUES (?, ?, ?)", (day.experiment_id, day.day, decision.model_dump_json()))
+        conn.execute(
+            "INSERT OR REPLACE INTO day_stats(experiment_id, day, data) VALUES (?, ?, ?)",
+            (day.experiment_id, day.day, day.model_dump_json()),
+        )
+        conn.execute(
+            "INSERT OR REPLACE INTO decisions(experiment_id, day, data) VALUES (?, ?, ?)",
+            (day.experiment_id, day.day, decision.model_dump_json()),
+        )
         conn.commit()
     finally:
         conn.close()
+    audit_event(
+        "analyze_day",
+        {"experiment_id": day.experiment_id, "day": day.day, "segments": bool(segments)},
+        {"action": action, "narrative_source": narrative_source},
+    )
     return decision
+
+
+def get_timeline(experiment_id: str) -> dict:
+    """The full day-by-day decision series for an experiment (Objective 5:
+    'continuously monitors experiment performance'). A single POST /monitor
+    call only ever shows one day; this is the trend.
+
+    Calls init_db() defensively: unlike the other read paths in this module,
+    this one may reasonably be the first call made against a given database
+    (a monitoring dashboard polling before any experiment has been created
+    in this process), and querying a table that does not exist yet should
+    raise the documented KeyError, not a raw sqlite3.OperationalError.
+    """
+    init_db()
+    _load_experiment(experiment_id)  # raises KeyError if unknown, matching other endpoints
+    conn = get_conn()
+    try:
+        day_rows = conn.execute(
+            "SELECT day, data FROM day_stats WHERE experiment_id = ? ORDER BY day", (experiment_id,)
+        ).fetchall()
+        decision_rows = conn.execute(
+            "SELECT day, data FROM decisions WHERE experiment_id = ? ORDER BY day", (experiment_id,)
+        ).fetchall()
+    finally:
+        conn.close()
+
+    decisions_by_day = {row["day"]: json.loads(row["data"]) for row in decision_rows}
+    series = []
+    for row in day_rows:
+        day_number = row["day"]
+        entry = {"day": day_number, "telemetry": json.loads(row["data"])}
+        decision = decisions_by_day.get(day_number)
+        if decision:
+            entry["action"] = decision["action"]
+            entry["confidence"] = decision["confidence"]
+            entry["lift_abs"] = decision["reasoning_stats"]["lift_abs"]
+            entry["prob_beats_control"] = decision["reasoning_stats"]["prob_beats_control"]
+            entry["narrative"] = decision["narrative"]
+        series.append(entry)
+
+    latest_action = series[-1]["action"] if series and "action" in series[-1] else None
+    return {
+        "experiment_id": experiment_id,
+        "days_observed": len(series),
+        "latest_action": latest_action,
+        "series": series,
+    }
 
 
 def get_ontology(experiment_id: str) -> dict:
