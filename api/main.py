@@ -9,6 +9,7 @@ from agents.graph import run_copilot
 from api.service import (
     analyze_day,
     branch_ontology,
+    conclude_experiment,
     create_experiment,
     get_ontology,
     get_timeline,
@@ -77,6 +78,21 @@ def start(experiment_id: str) -> dict:
         return start_experiment(experiment_id).model_dump(mode="json")
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/experiments/{experiment_id}/conclude")
+def conclude(experiment_id: str) -> dict:
+    try:
+        return conclude_experiment(experiment_id).model_dump(mode="json")
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/reset")
+def reset_db() -> dict:
+    from api.service import reset_all_experiments
+    return reset_all_experiments()
+
 
 
 @app.get("/experiments/{experiment_id}/ontology")

@@ -69,8 +69,8 @@ class Recommendation:
 
 def recommend_segment(category: str, preferred_segment: str | None = None) -> dict:
     """Pick a real segment row: an explicit preference if valid, else the segment
-    most represented among shipped precedents for this category, else the
-    largest-traffic segment overall."""
+    most represented among shipped precedents for this category (excluding segments
+    with active running experiments), else the largest-traffic free segment overall."""
     conn = get_conn()
     try:
         if preferred_segment:
@@ -79,6 +79,12 @@ def recommend_segment(category: str, preferred_segment: str | None = None) -> di
             ).fetchone()
             if row:
                 return dict(row)
+        # Find busy segments currently running an experiment
+        busy_rows = conn.execute(
+            "SELECT DISTINCT segment FROM flags WHERE status = 'running'"
+        ).fetchall()
+        busy_segments = {r["segment"] for r in busy_rows}
+
         row = conn.execute(
             """
             SELECT s.* FROM segments s
@@ -86,18 +92,26 @@ def recommend_segment(category: str, preferred_segment: str | None = None) -> di
             WHERE h.category = ? AND h.outcome = 'shipped'
             GROUP BY s.segment_key
             ORDER BY COUNT(*) DESC, s.daily_traffic DESC
-            LIMIT 1
             """,
             (category,),
-        ).fetchone()
-        if row:
-            return dict(row)
-        row = conn.execute("SELECT * FROM segments ORDER BY daily_traffic DESC LIMIT 1").fetchone()
-        if row is None:
-            raise LookupError("segments table is empty; run data.seed before recommending")
-        return dict(row)
+        ).fetchall()
+        for r in row:
+            if r["segment_key"] not in busy_segments:
+                return dict(r)
+
+        # Fallback to largest non-busy segment overall
+        all_segments = conn.execute("SELECT * FROM segments ORDER BY daily_traffic DESC").fetchall()
+        for r in all_segments:
+            if r["segment_key"] not in busy_segments:
+                return dict(r)
+
+        # If all segments are busy, fall back to the top segment
+        if all_segments:
+            return dict(all_segments[0])
+        raise LookupError("segments table is empty; run data.seed before recommending")
     finally:
         conn.close()
+
 
 
 def recommend_flag(category: str, segment_key: str) -> dict | None:

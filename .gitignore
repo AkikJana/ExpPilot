@@ -13,3 +13,5 @@ checkpoints.db
 *.db-shm
 *.db-wal
 .env
+.claude/
+
