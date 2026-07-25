@@ -22,7 +22,8 @@ from data.db import get_conn, init_db
 from data.seed import ensure_seeded
 from harness.gitops import gitops_proposal
 from ontology.tree import initial_tree
-from shared.models import DayStats, Decision, ExperimentConfig, Hypothesis, SegmentDayStats
+from rules_engine.decision import evaluate_decision
+from shared.models import DayStats, Decision, DecisionRecommendation, ExperimentConfig, Hypothesis, SegmentDayStats
 from stats.core import compute_day_stats, decide, power_analysis
 from stats.diagnostics import analyze_drivers
 
@@ -207,21 +208,20 @@ def reset_all_experiments() -> dict:
 
 
 def analyze_day(day: DayStats, segments: list[SegmentDayStats] | None = None) -> Decision:
-    """Compute the deterministic decision for one day, then narrate it in
-    business language. `segments`, when given, unlocks the driver diagnostics
-    (Objective 6): the narrative can then say which audience is driving or
-    dragging the result instead of only reporting the aggregate number.
+    """Compute the deterministic decision for one day using evaluate_decision,
+    then narrate it in business language.
     """
     config = _load_experiment(day.experiment_id)
     result = compute_day_stats(day, config, seed=day.day)
-    action = decide(result, config)
-    confidence = result.prob_beats_control if action == "scale" else 1 - result.prob_beats_control
+    rec = evaluate_decision(result, config)
+    action = rec.action_code
+    confidence = rec.confidence_score
 
     driver_analysis = None
     if segments:
         driver_analysis = analyze_drivers(result.lift_abs, segments)
 
-    narrative, narrative_source = narrate_decision(action, result, driver_analysis)
+    narrative, narrative_source = narrate_decision(rec, result, driver_analysis)
 
     decision = Decision(
         experiment_id=day.experiment_id,
@@ -233,6 +233,7 @@ def analyze_day(day: DayStats, segments: list[SegmentDayStats] | None = None) ->
         requires_human=action in {"scale", "rollback", "stop", "pause"},
         human_verdict="pending",
         human_reason=None,
+        recommendation=rec,
     )
     conn = get_conn()
     try:

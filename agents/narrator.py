@@ -16,7 +16,7 @@ from __future__ import annotations
 import re
 
 from agents.llm import ask_cursor
-from shared.models import StatsResult
+from shared.models import DecisionRecommendation, StatsResult
 from stats.diagnostics import DriverAnalysis
 
 _TOLERANCE = 0.02  # relative tolerance for a narrated number vs its ground truth
@@ -132,13 +132,14 @@ def _template_narrative(action: str, stats: StatsResult, driver_analysis: Driver
 
 
 def narrate_decision(
-    action: str,
+    action: str | DecisionRecommendation,
     stats: StatsResult,
     driver_analysis: DriverAnalysis | None = None,
 ) -> tuple[str, str]:
     """Return (narrative, source). source is 'llm' if Cursor's prose passed the
     numeric guard, else 'template'."""
-    template = _template_narrative(action, stats, driver_analysis)
+    act_str = action.action_code if isinstance(action, DecisionRecommendation) else str(action).lower()
+    template = _template_narrative(act_str, stats, driver_analysis)
 
     driver_summary = ""
     if driver_analysis is not None and driver_analysis.top_driver is not None:
@@ -152,7 +153,7 @@ def narrate_decision(
         "Write a two-sentence, business-friendly summary of this experiment result for a "
         "non-technical product manager. Use ONLY the numbers given below; do not invent, "
         "round into a different-looking figure, or add any number not present here.\n"
-        f"Recommended action: {action}.\n"
+        f"Recommended action: {act_str}.\n"
         f"Day {stats.day}. Absolute lift: {stats.lift_abs * 100:.2f} percentage points. "
         f"Confidence the treatment beats control: {stats.prob_beats_control * 100:.1f}%. "
         f"P-value: {stats.p_value:.4f}. Guardrail margin: {stats.guardrail_margin * 100:.2f} points."

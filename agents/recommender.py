@@ -12,6 +12,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from data.db import get_conn
+from rules_engine.decision import evaluate_decision
+from shared.models import DecisionRecommendation, HypothesisSpec
 
 _CATEGORY_KEYWORDS: dict[str, tuple[str, ...]] = {
     "checkout": ("checkout", "payment step", "purchase flow", "buy now", "one-page", "guest"),
@@ -65,6 +67,25 @@ class Recommendation:
     guardrail_metrics: list[dict]
     precedents: list[dict]
     issues: list[str]
+    flags: list[dict] | None = None
+
+    @property
+    def feature_flag_keys(self) -> list[str]:
+        if self.flags:
+            return [f["flag_key"] for f in self.flags if "flag_key" in f]
+        if self.flag and "flag_key" in self.flag:
+            return [self.flag["flag_key"]]
+        return []
+
+    def to_hypothesis_spec(self, hypothesis_statement: str = "") -> HypothesisSpec:
+        """Convert recommendation into a valid HypothesisSpec schema."""
+        return HypothesisSpec(
+            hypothesis=hypothesis_statement or f"Optimization hypothesis for {self.category}",
+            primary_metric=self.primary_metric.get("metric_key", _FALLBACK_PRIMARY_METRIC),
+            guardrail_metrics=[m["metric_key"] for m in self.guardrail_metrics if "metric_key" in m],
+            feature_flag_keys=self.feature_flag_keys,
+            target_audience=self.segment,
+        )
 
 
 def recommend_segment(category: str, preferred_segment: str | None = None) -> dict:
@@ -113,24 +134,42 @@ def recommend_segment(category: str, preferred_segment: str | None = None) -> di
         conn.close()
 
 
-
 def recommend_flag(category: str, segment_key: str) -> dict | None:
     """Pick a free flag matching category + segment; widen the search if none exists."""
+    flags = recommend_flags(category, segment_key, count=1)
+    return flags[0] if flags else None
+
+
+def recommend_flags(category: str, segment_key: str, count: int = 1) -> list[dict]:
+    """Pick up to `count` free flags matching category + segment; widen the search if needed."""
     conn = get_conn()
     try:
-        row = conn.execute(
-            "SELECT * FROM feature_flags WHERE category = ? AND segment_key = ? AND status = 'free' LIMIT 1",
-            (category, segment_key),
-        ).fetchone()
-        if row:
-            return dict(row)
-        row = conn.execute(
-            "SELECT * FROM feature_flags WHERE category = ? AND status = 'free' LIMIT 1", (category,)
-        ).fetchone()
-        if row:
-            return dict(row)
-        row = conn.execute("SELECT * FROM feature_flags WHERE status = 'free' LIMIT 1").fetchone()
-        return dict(row) if row else None
+        rows = conn.execute(
+            "SELECT * FROM feature_flags WHERE category = ? AND segment_key = ? AND status = 'free' LIMIT ?",
+            (category, segment_key, count),
+        ).fetchall()
+        flags = [dict(r) for r in rows]
+        if len(flags) < count:
+            existing_keys = {f["flag_key"] for f in flags}
+            more = conn.execute(
+                "SELECT * FROM feature_flags WHERE category = ? AND status = 'free' LIMIT ?",
+                (category, count * 2),
+            ).fetchall()
+            for r in more:
+                if r["flag_key"] not in existing_keys and len(flags) < count:
+                    flags.append(dict(r))
+                    existing_keys.add(r["flag_key"])
+        if len(flags) < count:
+            existing_keys = {f["flag_key"] for f in flags}
+            more = conn.execute(
+                "SELECT * FROM feature_flags WHERE status = 'free' LIMIT ?",
+                (count * 2,),
+            ).fetchall()
+            for r in more:
+                if r["flag_key"] not in existing_keys and len(flags) < count:
+                    flags.append(dict(r))
+                    existing_keys.add(r["flag_key"])
+        return flags
     finally:
         conn.close()
 
@@ -192,16 +231,17 @@ def find_precedents(category: str, segment_key: str | None = None, limit: int = 
         conn.close()
 
 
-def recommend(goal: str, preferred_segment: str | None = None) -> Recommendation:
+def recommend(goal: str, preferred_segment: str | None = None, flag_count: int = 1) -> Recommendation:
     """The single entry point: goal in, a fully-grounded recommendation out."""
     category = infer_category(goal)
     segment = recommend_segment(category, preferred_segment)
-    flag = recommend_flag(category, segment["segment_key"])
+    flags = recommend_flags(category, segment["segment_key"], count=flag_count)
+    flag = flags[0] if flags else None
     metrics = recommend_metrics(category)
     precedents = find_precedents(category, segment["segment_key"])
 
     issues: list[str] = []
-    if flag is None:
+    if not flags:
         issues.append(f"No free feature flag available for category '{category}'.")
     if not precedents:
         issues.append(f"No historical precedent found for category '{category}'; recommendation is unproven.")
@@ -214,4 +254,13 @@ def recommend(goal: str, preferred_segment: str | None = None) -> Recommendation
         guardrail_metrics=metrics["guardrails"],
         precedents=precedents,
         issues=issues,
+        flags=flags,
     )
+
+
+def produce_hypothesis_spec(
+    goal: str, statement: str = "", preferred_segment: str | None = None, flag_count: int = 1
+) -> HypothesisSpec:
+    """Generate a valid HypothesisSpec from a business goal."""
+    rec = recommend(goal, preferred_segment=preferred_segment, flag_count=flag_count)
+    return rec.to_hypothesis_spec(hypothesis_statement=statement)

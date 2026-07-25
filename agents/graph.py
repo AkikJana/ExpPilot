@@ -17,6 +17,7 @@ class CopilotState(TypedDict):
     telemetry: NotRequired[dict]
     proposal: NotRequired[dict]
     decision: NotRequired[dict]
+    recommendation: NotRequired[dict]
 
 
 def _configure(state: CopilotState) -> dict:
@@ -32,7 +33,10 @@ def _monitor(state: CopilotState) -> dict:
         return {}
     proposal = state["proposal"]
     day = DayStats(experiment_id=proposal["config"]["id"], **telemetry)
-    return {"decision": analyze_day(day).model_dump(mode="json")}
+    dec_obj = analyze_day(day)
+    dec_dict = dec_obj.model_dump(mode="json")
+    rec_dict = dec_dict.get("recommendation")
+    return {"decision": dec_dict, "recommendation": rec_dict}
 
 
 def _route_after_configure(state: CopilotState) -> str:

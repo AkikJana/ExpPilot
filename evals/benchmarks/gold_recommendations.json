@@ -1,0 +1,182 @@
+[
+  {
+    "id": "gold_01",
+    "goal": "Collapse the mobile checkout into a single page",
+    "expected_category": "checkout",
+    "expected_segment": "mobile_users",
+    "expected_flag": "checkout_one_page",
+    "expected_primary_metric": "conversion_rate",
+    "expected_guardrail_metrics": ["checkout_abandon_rate", "error_rate", "refund_rate"]
+  },
+  {
+    "id": "gold_02",
+    "goal": "Allow purchase without account creation for guest users",
+    "expected_category": "checkout",
+    "expected_segment": "new_users",
+    "expected_flag": "checkout_guest_mode",
+    "expected_primary_metric": "conversion_rate",
+    "expected_guardrail_metrics": ["checkout_abandon_rate", "error_rate", "refund_rate"]
+  },
+  {
+    "id": "gold_03",
+    "goal": "Show all hidden fees before the payment step",
+    "expected_category": "checkout",
+    "expected_segment": "all_users",
+    "expected_flag": "checkout_fee_transparency",
+    "expected_primary_metric": "conversion_rate",
+    "expected_guardrail_metrics": ["checkout_abandon_rate", "error_rate", "refund_rate"]
+  },
+  {
+    "id": "gold_04",
+    "goal": "In-session nudge when a cart is about to be abandoned",
+    "expected_category": "cart",
+    "expected_segment": "cart_abandoners",
+    "expected_flag": "cart_recovery_nudge",
+    "expected_primary_metric": "conversion_rate",
+    "expected_guardrail_metrics": ["checkout_abandon_rate", "error_rate"]
+  },
+  {
+    "id": "gold_05",
+    "goal": "Suggest an accessory device upgrade bundle at cart step",
+    "expected_category": "bundles",
+    "expected_segment": "device_upgrade_eligible",
+    "expected_flag": "cart_bundle_suggest",
+    "expected_primary_metric": "conversion_rate",
+    "expected_guardrail_metrics": ["refund_rate", "support_contact_rate"]
+  },
+  {
+    "id": "gold_06",
+    "goal": "Show percentage-saved badge on device upgrade bundle offers",
+    "expected_category": "bundles",
+    "expected_segment": "device_upgrade_eligible",
+    "expected_flag": "bundle_pricing_badge",
+    "expected_primary_metric": "conversion_rate",
+    "expected_guardrail_metrics": ["refund_rate", "support_contact_rate"]
+  },
+  {
+    "id": "gold_07",
+    "goal": "Simplified side-by-side subscription plan comparison table",
+    "expected_category": "plan_upgrades",
+    "expected_segment": "plan_browsers",
+    "expected_flag": "plan_comparison_table",
+    "expected_primary_metric": "conversion_rate",
+    "expected_guardrail_metrics": ["support_contact_rate", "unsubscribe_rate"]
+  },
+  {
+    "id": "gold_08",
+    "goal": "Reframe tier upgrade paywall copy around monthly savings",
+    "expected_category": "plan_upgrades",
+    "expected_segment": "plan_browsers",
+    "expected_flag": "plan_upgrade_paywall_copy",
+    "expected_primary_metric": "conversion_rate",
+    "expected_guardrail_metrics": ["support_contact_rate", "unsubscribe_rate"]
+  },
+  {
+    "id": "gold_09",
+    "goal": "Present targeted save offer at cancellation to prevent customer churn",
+    "expected_category": "churn",
+    "expected_segment": "at_risk_users",
+    "expected_flag": "churn_save_offer",
+    "expected_primary_metric": "conversion_rate",
+    "expected_guardrail_metrics": ["unsubscribe_rate", "support_contact_rate"]
+  },
+  {
+    "id": "gold_10",
+    "goal": "Move customer retention win-back offer timing from day 7 to day 3",
+    "expected_category": "churn",
+    "expected_segment": "at_risk_users",
+    "expected_flag": "churn_offer_timing",
+    "expected_primary_metric": "conversion_rate",
+    "expected_guardrail_metrics": ["unsubscribe_rate", "support_contact_rate"]
+  },
+  {
+    "id": "gold_11",
+    "goal": "Reduce user signup onboarding flow from six steps to three",
+    "expected_category": "onboarding",
+    "expected_segment": "new_users",
+    "expected_flag": "onboarding_short_flow",
+    "expected_primary_metric": "conversion_rate",
+    "expected_guardrail_metrics": ["crash_free_rate", "error_rate"]
+  },
+  {
+    "id": "gold_12",
+    "goal": "Collect new user profile fields progressively after activation welcome",
+    "expected_category": "onboarding",
+    "expected_segment": "new_users",
+    "expected_flag": "onboarding_progressive",
+    "expected_primary_metric": "conversion_rate",
+    "expected_guardrail_metrics": ["crash_free_rate", "error_rate"]
+  },
+  {
+    "id": "gold_13",
+    "goal": "Prompt autopay billing enrolment on the postpaid billing screen",
+    "expected_category": "payments",
+    "expected_segment": "postpaid_users",
+    "expected_flag": "payments_autopay_nudge",
+    "expected_primary_metric": "conversion_rate",
+    "expected_guardrail_metrics": ["refund_rate", "error_rate"]
+  },
+  {
+    "id": "gold_14",
+    "goal": "Show loyalty points reward balance in header for high-value users",
+    "expected_category": "loyalty",
+    "expected_segment": "high_value_users",
+    "expected_flag": "loyalty_points_banner",
+    "expected_primary_metric": "conversion_rate",
+    "expected_guardrail_metrics": ["unsubscribe_rate"]
+  },
+  {
+    "id": "gold_15",
+    "goal": "Double-sided referral incentive banner for returning users",
+    "expected_category": "loyalty",
+    "expected_segment": "returning_users",
+    "expected_flag": "referral_incentive",
+    "expected_primary_metric": "conversion_rate",
+    "expected_guardrail_metrics": ["unsubscribe_rate"]
+  },
+  {
+    "id": "gold_16",
+    "goal": "Improved search autocomplete ranking on desktop search browse",
+    "expected_category": "discovery",
+    "expected_segment": "desktop_users",
+    "expected_flag": "search_autocomplete_v2",
+    "expected_primary_metric": "conversion_rate",
+    "expected_guardrail_metrics": ["latency_p95_ms", "error_rate"]
+  },
+  {
+    "id": "gold_17",
+    "goal": "Personalised product recommendations on item discovery pages",
+    "expected_category": "discovery",
+    "expected_segment": "all_users",
+    "expected_flag": "pdp_recommendations",
+    "expected_primary_metric": "conversion_rate",
+    "expected_guardrail_metrics": ["latency_p95_ms", "error_rate"]
+  },
+  {
+    "id": "gold_18",
+    "goal": "Add step indicator progress bar to mobile checkout",
+    "expected_category": "checkout",
+    "expected_segment": "mobile_users",
+    "expected_flag": "checkout_progress_bar",
+    "expected_primary_metric": "conversion_rate",
+    "expected_guardrail_metrics": ["checkout_abandon_rate", "error_rate", "refund_rate"]
+  },
+  {
+    "id": "gold_19",
+    "goal": "Redesigned home surface product bundle carousel for all users",
+    "expected_category": "bundles",
+    "expected_segment": "all_users",
+    "expected_flag": "bundle_carousel_v2",
+    "expected_primary_metric": "conversion_rate",
+    "expected_guardrail_metrics": ["refund_rate", "support_contact_rate"]
+  },
+  {
+    "id": "gold_20",
+    "goal": "Social proof adoption statistics on subscription upgrade page",
+    "expected_category": "plan_upgrades",
+    "expected_segment": "plan_browsers",
+    "expected_flag": "plan_social_proof",
+    "expected_primary_metric": "conversion_rate",
+    "expected_guardrail_metrics": ["support_contact_rate", "unsubscribe_rate"]
+  }
+]
