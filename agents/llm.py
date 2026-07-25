@@ -1,8 +1,10 @@
-"""Cursor CLI adapter.
+"""LLM adapter — Gemini API (deployed) with Cursor CLI fallback (local dev).
 
-This module intentionally has no API-key or local-model provider.  Cursor's
-authenticated CLI is the sole LLM integration; deterministic templates preserve
-the lifecycle when the CLI is unavailable (for example inside CI).
+When GEMINI_API_KEY is set (e.g. as a Railway secret), hypothesis generation
+uses the Gemini Flash API.  When the key is absent but the Cursor CLI binary
+is available (local workstation), it falls through to the authenticated CLI.
+If neither is reachable, deterministic precedent-grounded templates guarantee
+the lifecycle continues without any LLM dependency.
 """
 
 from __future__ import annotations
@@ -14,10 +16,70 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+import requests as http_requests  # avoid shadowing with function-local names
+
 ROOT = Path(__file__).resolve().parents[1]
 CURSOR_BIN = os.getenv("CURSOR_AGENT_BIN", "cursor-agent")
 
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-flash-latest")
+GEMINI_URL = (
+    f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
+)
 
+
+# ---------------------------------------------------------------------------
+# Gemini API
+# ---------------------------------------------------------------------------
+def gemini_available() -> bool:
+    return bool(GEMINI_API_KEY)
+
+
+def ask_gemini(prompt: str, timeout: int = 90) -> str | None:
+    """Call the Gemini REST API. Returns the text response or None on failure."""
+    if not gemini_available():
+        return None
+    try:
+        resp = http_requests.post(
+            GEMINI_URL,
+            headers={
+                "Content-Type": "application/json",
+                "X-goog-api-key": GEMINI_API_KEY,
+            },
+            json={
+                "contents": [{"parts": [{"text": prompt}]}],
+                "generationConfig": {
+                    "temperature": 0.7,
+                    "maxOutputTokens": 1024,
+                },
+            },
+            timeout=timeout,
+        )
+        if resp.status_code != 200:
+            return None
+        data = resp.json()
+        # Navigate the Gemini response structure
+        candidates = data.get("candidates", [])
+        if not candidates:
+            return None
+        parts = candidates[0].get("content", {}).get("parts", [])
+        if not parts:
+            return None
+        text = parts[0].get("text", "").strip()
+        # Gemini sometimes wraps JSON in ```json ... ``` fences — strip them
+        if text.startswith("```"):
+            lines = text.split("\n")
+            # Remove first line (```json) and last line (```)
+            lines = [l for l in lines if not l.strip().startswith("```")]
+            text = "\n".join(lines).strip()
+        return text if text else None
+    except (http_requests.RequestException, json.JSONDecodeError, KeyError, IndexError):
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Cursor CLI (local dev fallback)
+# ---------------------------------------------------------------------------
 def cursor_available() -> bool:
     return shutil.which(CURSOR_BIN) is not None
 
@@ -56,6 +118,15 @@ def ask_cursor(prompt: str, timeout: int = 90) -> str | None:
         return result.strip() if isinstance(result, str) else None
     except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError):
         return None
+
+
+# ---------------------------------------------------------------------------
+# Unified ask — Gemini first, then Cursor, then None
+# ---------------------------------------------------------------------------
+def ask_llm(prompt: str, timeout: int = 90) -> str | None:
+    """Try Gemini API first (deployed), fall back to Cursor CLI (local dev)."""
+    return ask_gemini(prompt, timeout) or ask_cursor(prompt, timeout)
+
 
 
 _GENERIC_FALLBACK: list[dict[str, Any]] = [
@@ -152,12 +223,12 @@ def _deterministic_fallback(goal: str, precedents: list[dict[str, Any]]) -> list
 
 
 def hypotheses_for_goal(goal: str, precedents: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
-    """Generate candidates with Cursor, grounded in real precedents when given,
-    falling back to auditable templates -- themselves precedent-grounded when
-    possible -- if Cursor is unavailable or returns something unusable."""
+    """Generate candidates with Gemini (deployed) or Cursor (local dev),
+    grounded in real precedents when given, falling back to auditable
+    templates if neither LLM is available or returns something unusable."""
     precedents = precedents or []
     prompt = _build_prompt(goal, precedents)
-    response = ask_cursor(prompt)
+    response = ask_llm(prompt)
     if response:
         try:
             candidates = json.loads(response)
@@ -166,3 +237,4 @@ def hypotheses_for_goal(goal: str, precedents: list[dict[str, Any]] | None = Non
         except json.JSONDecodeError:
             pass
     return _deterministic_fallback(goal, precedents)
+

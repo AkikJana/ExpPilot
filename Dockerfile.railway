@@ -1,0 +1,27 @@
+# Railway-optimised image — runs both the FastAPI API and Streamlit UI in a
+# single container so the project deploys as one Railway service.
+FROM python:3.11-slim
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1
+
+WORKDIR /app
+
+# System deps needed by scipy (BLAS) and psycopg-binary (libpq).
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends libpq5 && \
+    rm -rf /var/lib/apt/lists/*
+
+# Install Python deps first for better layer caching.
+COPY requirements.txt ./
+RUN pip install --upgrade pip && pip install -r requirements.txt
+
+COPY . .
+
+RUN chmod +x start.sh
+
+# Railway injects $PORT at runtime (defaults to 8501 in start.sh).
+EXPOSE 8000 8501
+
+CMD ["bash", "start.sh"]

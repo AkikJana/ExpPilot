@@ -114,9 +114,16 @@ def create_experiment(
             (config.id, config.model_dump_json(), config.status, json.dumps({"ontology": tree.as_dict()})),
         )
         conn.execute(
-            "INSERT OR REPLACE INTO flags(key, segment, status, running_experiment_id) VALUES (?, ?, ?, ?)",
+            """
+            INSERT INTO flags(key, segment, status, running_experiment_id) VALUES (?, ?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET
+                segment = excluded.segment,
+                status = excluded.status,
+                running_experiment_id = excluded.running_experiment_id
+            """,
             (config.flag_key, config.audience_segment, "validated", None),
         )
+
         # Keep the rich flag catalog in sync: a flag claimed by a draft/validated
         # experiment should not be recommended again for a different one. This
         # is a no-op UPDATE if flag_key is a synthetic fallback key not in the
@@ -161,6 +168,44 @@ def start_experiment(experiment_id: str) -> ExperimentConfig:
     return config
 
 
+def conclude_experiment(experiment_id: str) -> ExperimentConfig:
+    """Mark an experiment as concluded and free its flag/segment for reuse."""
+    config = _load_experiment(experiment_id)
+    config.status = "concluded"
+    conn = get_conn()
+    try:
+        conn.execute(
+            "UPDATE experiments SET config = ?, status = ? WHERE id = ?",
+            (config.model_dump_json(), "concluded", experiment_id),
+        )
+        conn.execute(
+            "UPDATE flags SET status = 'free', running_experiment_id = NULL WHERE key = ?",
+            (config.flag_key,),
+        )
+        conn.execute("UPDATE feature_flags SET status = 'free' WHERE flag_key = ?", (config.flag_key,))
+        conn.commit()
+    finally:
+        conn.close()
+    return config
+
+
+def reset_all_experiments() -> dict:
+    """Clear all experiments and free all flags. For testing/demo use only."""
+    init_db()
+    conn = get_conn()
+    try:
+        conn.execute("DELETE FROM decisions")
+        conn.execute("DELETE FROM day_stats")
+        conn.execute("DELETE FROM experiments")
+        conn.execute("UPDATE flags SET status = 'free', running_experiment_id = NULL")
+        conn.execute("UPDATE feature_flags SET status = 'free'")
+        conn.commit()
+    finally:
+        conn.close()
+    return {"status": "reset", "detail": "All experiments cleared, all flags freed."}
+
+
+
 def analyze_day(day: DayStats, segments: list[SegmentDayStats] | None = None) -> Decision:
     """Compute the deterministic decision for one day, then narrate it in
     business language. `segments`, when given, unlocks the driver diagnostics
@@ -192,13 +237,20 @@ def analyze_day(day: DayStats, segments: list[SegmentDayStats] | None = None) ->
     conn = get_conn()
     try:
         conn.execute(
-            "INSERT OR REPLACE INTO day_stats(experiment_id, day, data) VALUES (?, ?, ?)",
+            """
+            INSERT INTO day_stats(experiment_id, day, data) VALUES (?, ?, ?)
+            ON CONFLICT(experiment_id, day) DO UPDATE SET data = excluded.data
+            """,
             (day.experiment_id, day.day, day.model_dump_json()),
         )
         conn.execute(
-            "INSERT OR REPLACE INTO decisions(experiment_id, day, data) VALUES (?, ?, ?)",
+            """
+            INSERT INTO decisions(experiment_id, day, data) VALUES (?, ?, ?)
+            ON CONFLICT(experiment_id, day) DO UPDATE SET data = excluded.data
+            """,
             (day.experiment_id, day.day, decision.model_dump_json()),
         )
+
         conn.commit()
     finally:
         conn.close()
