@@ -15,7 +15,7 @@ ExpPilot consists of four core modular subsystems integrated into a unified work
 | 3 | R1: Hypothesis Gen & Validation | `rules_engine/validator.py`, `HypothesisSpec`, `ValidationResult` | M1 | DONE |
 | 4 | R2: Statistical Engine & Monitoring | Guardrail direction fix, mSPRT, multi-guardrail telemetry | M1 | DONE |
 | 5 | R3: Decision Recommendation Engine | `rules_engine/decision.py`, `DecisionRecommendation` ("Scale"/"Continue"/"Stop"/"Rollback") | M3, M4 | DONE |
-| 6 | R4: Evals Suite & System Alignment | Evals scripts in `evals/`, 100% E2E test pass, Tier 5 adversarial hardening | M2, M5 | IN_PROGRESS |
+| 6 | R4: Evals Suite & System Alignment | Evals scripts in `evals/`, 100% E2E test pass, Tier 5 adversarial hardening, Forensic Audit | M2, M5 | DONE |
 
 ## Interface Contracts
 ### Hypothesis Generator ↔ Pre-Launch Validator
@@ -35,5 +35,5 @@ ExpPilot consists of four core modular subsystems integrated into a unified work
 - `rules_engine/`: Pre-launch validation (`validator.py`) and decision recommendation rules (`decision.py`).
 - `stats/`: Frequentist, Bayesian, mSPRT sequential testing, and driver diagnostics (`core.py`, `diagnostics.py`).
 - `evals/`: Automated evaluation benchmarks (`evals/benchmarks/`) and evaluation metrics runner (`evaluator.py`, `run_evals.py`).
-- `tests/`: Complete unit, integration, and E2E test suites (`test_lifecycle.py`, `test_stats.py`, `test_validator.py`, `test_recommender.py`, `test_api.py`, `test_graph.py`, `test_harness.py`, `test_evals.py`, `test_decision.py`).
+- `tests/`: Complete unit, integration, E2E, and adversarial test suites (`test_lifecycle.py`, `test_stats.py`, `test_validator.py`, `test_recommender.py`, `test_api.py`, `test_graph.py`, `test_harness.py`, `test_evals.py`, `test_decision.py`, `test_adversarial_m6_2.py`).
 - `api/` / `ui/`: FastAPI endpoints and Streamlit interactive workspace.

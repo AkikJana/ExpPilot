@@ -135,11 +135,21 @@ def narrate_decision(
     action: str | DecisionRecommendation,
     stats: StatsResult,
     driver_analysis: DriverAnalysis | None = None,
+    allow_llm: bool = True,
 ) -> tuple[str, str]:
     """Return (narrative, source). source is 'llm' if Cursor's prose passed the
-    numeric guard, else 'template'."""
+    numeric guard, else 'template'.
+
+    `allow_llm=False` skips the model call entirely and returns the deterministic
+    template. Replaying a whole simulated experiment would otherwise fire one LLM
+    request per day, which is slow and pointless when only the final day's
+    narrative is ever read.
+    """
     act_str = action.action_code if isinstance(action, DecisionRecommendation) else str(action).lower()
     template = _template_narrative(act_str, stats, driver_analysis)
+
+    if not allow_llm:
+        return template, "template"
 
     driver_summary = ""
     if driver_analysis is not None and driver_analysis.top_driver is not None:

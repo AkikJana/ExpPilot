@@ -115,6 +115,19 @@ class ValidationReport(BaseModel):
 
 
 
+class ValidationBlocked(ValueError):
+    """Pre-launch validation found blocking issues, so nothing was created.
+
+    Subclasses ValueError so existing `except ValueError` handlers keep mapping
+    it to 409, while carrying the structured report so the caller can show
+    exactly which checks failed instead of a flattened string.
+    """
+
+    def __init__(self, report: ValidationReport) -> None:
+        self.report = report
+        super().__init__("; ".join(issue.message for issue in report.blocking))
+
+
 class ExperimentConfig(BaseModel):
     """The design-time configuration of an experiment."""
 

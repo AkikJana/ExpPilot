@@ -63,6 +63,49 @@ class HarnessGitOpsTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             gitops_proposal(config, "draft")
 
+    def test_gitops_yaml_syntax_and_structure_validation(self) -> None:
+        """Adversarial test validating generated Harness GitOps manifests against YAML syntax and structural schema."""
+        import yaml
+
+        config = self._make_config()
+
+        # Test each terminal action
+        for action in ("scale", "stop", "rollback", "pause"):
+            manifest_str = flag_manifest(config, action)
+
+            # 1. Parse YAML - raises yaml.YAMLError if syntax is invalid
+            parsed = yaml.safe_load(manifest_str)
+            self.assertIsInstance(parsed, dict)
+
+            # 2. Schema structure check
+            expected_root_keys = {"kind", "identifier", "name", "state", "target", "metadata"}
+            self.assertEqual(set(parsed.keys()), expected_root_keys)
+
+            # 3. Field assertions
+            self.assertEqual(parsed["kind"], "feature_flag")
+            self.assertEqual(parsed["identifier"], config.flag_key)
+            self.assertEqual(parsed["name"], f"ExpPilot {config.id}")
+
+            # State check: 'scale' is True; 'stop'/'rollback'/'pause' are False
+            expected_state = True if action == "scale" else False
+            self.assertEqual(parsed["state"], expected_state)
+
+            # Target structure
+            self.assertIn("segment", parsed["target"])
+            self.assertEqual(parsed["target"]["segment"], config.audience_segment)
+
+            # Metadata structure
+            metadata = parsed["metadata"]
+            self.assertEqual(metadata["experiment_id"], config.id)
+            self.assertEqual(metadata["action"], action)
+            self.assertEqual(metadata["managed_by"], "exppilot-gitops")
+
+        # 4. Custom segment override YAML validation
+        manifest_custom = flag_manifest(config, "scale", segment="custom_segment_xyz")
+        parsed_custom = yaml.safe_load(manifest_custom)
+        self.assertEqual(parsed_custom["target"]["segment"], "custom_segment_xyz")
+
 
 if __name__ == "__main__":
     unittest.main()
+

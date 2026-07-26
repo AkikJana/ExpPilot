@@ -9,12 +9,25 @@ from __future__ import annotations
 import io
 import os
 import subprocess
+import sys
 import time
 from pathlib import Path
 
 import pandas as pd
 import requests
 import streamlit as st
+
+# `streamlit run ui/app.py` puts ui/ on sys.path, not the project root, so
+# project imports below would fail with ModuleNotFoundError. Add the repo root
+# before them -- this is why the rest of this file talks to the backend over HTTP.
+_REPO_ROOT = str(Path(__file__).resolve().parent.parent)
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
+# Derivation runs in this process, not behind the API: a transaction log can be
+# hundreds of thousands of rows, and only the handful of segments it reduces to
+# needs to be sent to the backend.
+from data.derive import ColumnMapping, derive_segments, suggest_mapping  # noqa: E402
 
 API_URL = os.getenv("EXPILOT_API_URL", "http://localhost:8000")
 
@@ -30,6 +43,101 @@ def _backend_is_up() -> bool:
         return requests.get(f"{API_URL}/health", timeout=1).status_code == 200
     except requests.exceptions.RequestException:
         return False
+
+
+class ApiError(Exception):
+    """A failed API call, already translated into something worth showing.
+
+    `validation` is populated when the API rejected the request because a
+    pre-launch check blocked it, so the caller can render the report.
+    """
+
+    def __init__(self, message: str, *, hint: str | None = None, validation: dict | None = None) -> None:
+        super().__init__(message)
+        self.message = message
+        self.hint = hint
+        self.validation = validation
+
+
+def api(method: str, path: str, *, json: dict | None = None, timeout: int = 90):
+    """Single funnel for every backend call.
+
+    Every call site used to do its own `requests.post(...)` and then print
+    `response.text` on failure -- which is how a database outage reached the
+    screen as the word "Internal Server Error", and how a stopped API produced a
+    raw Streamlit traceback. Transport faults and structured API errors both end
+    up as one ApiError with a readable message.
+    """
+    try:
+        response = requests.request(method, f"{API_URL}{path}", json=json, timeout=timeout)
+    except requests.exceptions.ConnectionError as exc:
+        raise ApiError(
+            "Can't reach the ExpPilot API.",
+            hint=f"Nothing is answering on {API_URL}. If you're running locally, start it with "
+            "`uvicorn api.main:app --reload`.",
+        ) from exc
+    except requests.exceptions.Timeout as exc:
+        raise ApiError(
+            f"The API didn't respond within {timeout}s.",
+            hint="It may still be generating hypotheses. Try again, or check the API logs.",
+        ) from exc
+    except requests.exceptions.RequestException as exc:
+        raise ApiError(f"Request to the API failed: {type(exc).__name__}.") from exc
+
+    if response.ok:
+        return response.json()
+
+    # FastAPI puts our payload in `detail`; our own handlers return it top level.
+    try:
+        body = response.json()
+    except ValueError:
+        raise ApiError(
+            f"API returned HTTP {response.status_code}.",
+            hint=(response.text or "").strip()[:300] or None,
+        ) from None
+
+    payload = body.get("detail", body) if isinstance(body, dict) else body
+    if isinstance(payload, str):
+        raise ApiError(payload, hint=None)
+    if isinstance(payload, dict):
+        raise ApiError(
+            payload.get("detail") or payload.get("error") or f"API returned HTTP {response.status_code}.",
+            hint=payload.get("hint"),
+            validation=payload.get("validation"),
+        )
+    raise ApiError(f"API returned HTTP {response.status_code}.")
+
+
+def show_api_error(exc: ApiError) -> None:
+    """Render an ApiError the same way everywhere."""
+    st.error(f"**{exc.message}**" + (f"\n\n{exc.hint}" if exc.hint else ""))
+
+
+def render_validation(validation: dict) -> None:
+    """Show the pre-launch report as a result, not a JSON blob.
+
+    Detecting overlapping experiments and bad configuration is a headline
+    capability; it used to be buried in a collapsed `st.json` expander that
+    nobody would open.
+    """
+    blocking = validation.get("blocking", []) or []
+    warnings = validation.get("warnings", []) or []
+
+    if not blocking and not warnings:
+        st.success("**All pre-launch checks passed.** No blocking issues, no warnings.")
+        return
+
+    if blocking:
+        st.error(f"**{len(blocking)} blocking issue(s)** — the experiment cannot start until these are resolved.")
+        for issue in blocking:
+            st.markdown(f"- `{issue.get('code', 'blocking')}` — {issue.get('message', '')}")
+    else:
+        st.success("**No blocking issues.** Safe to start.")
+
+    if warnings:
+        st.warning(f"**{len(warnings)} warning(s)** — these do not block launch, but review them.")
+        for issue in warnings:
+            st.markdown(f"- `{issue.get('code', 'warning')}` — {issue.get('message', '')}")
 
 
 def _ensure_backend_running() -> None:
@@ -271,26 +379,47 @@ with st.sidebar:
         help="A clear product goal — e.g. 'Reduce churn for prepaid users'.",
     )
 
-    col_b, col_t = st.columns(2)
-    with col_b:
-        baseline = st.number_input(
-            "Baseline rate",
-            0.001,
-            0.99,
-            0.10,
-            0.005,
-            format="%.3f",
-            help="Current conversion rate (leave default to auto-detect from segment data).",
+    # Default to the catalog's real numbers. Pre-filled inputs used to override
+    # them silently, so a segment with 21,500 actual daily users would still be
+    # planned against a typed-in 2,000 -- and the runtime estimate came out an
+    # order of magnitude too long.
+    use_segment_data = st.checkbox(
+        "Use audience segment's real data",
+        value=True,
+        help="Read baseline conversion rate and daily traffic from the recommended "
+        "segment in the catalog. Uncheck to plan against your own numbers.",
+    )
+
+    if use_segment_data:
+        baseline = None
+        traffic = None
+        st.markdown(
+            '<span style="color:#64748b;font-size:0.76rem;">'
+            "Baseline rate and daily traffic are read from the segment ExpPilot recommends."
+            "</span>",
+            unsafe_allow_html=True,
         )
-    with col_t:
-        traffic = st.number_input(
-            "Daily traffic",
-            100,
-            10_000_000,
-            2000,
-            100,
-            help="Avg daily users entering the experiment.",
-        )
+    else:
+        col_b, col_t = st.columns(2)
+        with col_b:
+            baseline = st.number_input(
+                "Baseline rate",
+                0.001,
+                0.99,
+                0.10,
+                0.005,
+                format="%.3f",
+                help="Current conversion rate for the audience you are targeting.",
+            )
+        with col_t:
+            traffic = st.number_input(
+                "Daily traffic",
+                100,
+                10_000_000,
+                2000,
+                100,
+                help="Avg daily users entering the experiment.",
+            )
 
     st.markdown("")
     create = st.button("🚀  Generate Hypotheses", type="primary", use_container_width=True)
@@ -298,14 +427,14 @@ with st.sidebar:
     st.markdown("---")
     with st.expander("🛠️ Admin Tools", expanded=False):
         if st.button("🧹 Clear All Running Experiments"):
-            res = requests.post(f"{API_URL}/reset", timeout=10)
-            if res.ok:
+            try:
+                api("POST", "/reset", timeout=10)
                 st.toast("✅ All flags freed and experiments cleared!")
-                if "proposal" in st.session_state:
-                    del st.session_state["proposal"]
+                for key in ("proposal", "decision", "batch_results", "blocked_validation"):
+                    st.session_state.pop(key, None)
                 st.rerun()
-            else:
-                st.error(res.text)
+            except ApiError as exc:
+                show_api_error(exc)
 
     st.markdown(
         '<span style="color:#64748b;font-size:0.75rem;">'
@@ -332,31 +461,310 @@ def _action_badge(action: str) -> str:
 # ---------------------------------------------------------------------------
 # Create experiment
 # ---------------------------------------------------------------------------
+def build_proposal(
+    goal_text: str,
+    baseline_rate: float | None,
+    daily_traffic: int | None,
+    hypothesis_index: int = 0,
+) -> None:
+    """Ask the API for a proposal and store it, or explain why it could not.
+
+    Also used when the user switches to a different hypothesis, which is why it
+    takes an index rather than always configuring the top-ranked candidate.
+
+    `baseline_rate`/`daily_traffic` of None are omitted from the payload rather
+    than sent as null, which is how the API is asked to derive them from the
+    recommended segment's real observed data instead of a typed-in guess.
+    """
+    payload: dict = {"goal": goal_text, "hypothesis_index": hypothesis_index}
+    if baseline_rate is not None:
+        payload["baseline_rate"] = baseline_rate
+    if daily_traffic is not None:
+        payload["daily_traffic"] = daily_traffic
+
+    label = "Generating hypotheses and computing sample size…" if hypothesis_index == 0 else "Reconfiguring…"
+    try:
+        with st.spinner(label):
+            st.session_state["proposal"] = api("POST", "/experiments", json=payload)
+        st.session_state.pop("blocked_validation", None)
+        st.session_state["goal_text"] = goal_text
+        st.session_state["params_auto"] = baseline_rate is None and daily_traffic is None
+    except ApiError as exc:
+        # A blocking pre-launch check is a legitimate product outcome, not a
+        # crash: keep the report so the Design tab can show which check failed.
+        if exc.validation:
+            st.session_state["blocked_validation"] = exc.validation
+            st.session_state.pop("proposal", None)
+        else:
+            show_api_error(exc)
+
+
 if create:
-    with st.spinner("Generating hypotheses and computing sample size…"):
-        response = requests.post(
-            f"{API_URL}/experiments",
-            json={"goal": goal, "baseline_rate": baseline, "daily_traffic": traffic},
-            timeout=90,
-        )
-    if response.ok:
-        st.session_state["proposal"] = response.json()
-        st.toast("✅ Experiment proposal ready!", icon="🧪")
-    else:
-        st.error(f"API error: {response.text}")
+    build_proposal(goal, baseline, traffic, hypothesis_index=0)
 
 # ---------------------------------------------------------------------------
-# Main content – three tabs
+# Where the user is in the lifecycle
 # ---------------------------------------------------------------------------
 proposal = st.session_state.get("proposal")
+blocked_validation = st.session_state.get("blocked_validation")
 
-tab_design, tab_monitor, tab_harness = st.tabs(
-    ["📐  Experiment Design", "📊  Monitor & Analyze", "⚙️  Harness GitOps"]
+
+def render_stepper(active: int) -> None:
+    """A five-step lifecycle rail so the tabs stop feeling like three unrelated
+    screens. `active` is 1-based; earlier steps render as done."""
+    steps = ["Describe goal", "Choose hypothesis", "Pre-launch checks", "Run & monitor", "Decide"]
+    cells = []
+    for i, name in enumerate(steps, 1):
+        if i < active:
+            colour, mark, weight = "#22c55e", "✓", "500"
+        elif i == active:
+            colour, mark, weight = "#a78bfa", str(i), "700"
+        else:
+            colour, mark, weight = "#475569", str(i), "400"
+        cells.append(
+            f'<div style="display:flex;align-items:center;gap:.45rem;white-space:nowrap;">'
+            f'<span style="display:inline-flex;align-items:center;justify-content:center;'
+            f"width:1.35rem;height:1.35rem;border-radius:50%;border:1.5px solid {colour};"
+            f'color:{colour};font-size:.72rem;font-weight:600;">{mark}</span>'
+            f'<span style="color:{colour};font-size:.82rem;font-weight:{weight};">{name}</span>'
+            f"</div>"
+        )
+    separator = '<span style="color:#334155;">──</span>'
+    st.markdown(
+        '<div style="display:flex;align-items:center;gap:.6rem;flex-wrap:wrap;margin:.2rem 0 1.4rem;">'
+        + separator.join(cells)
+        + "</div>",
+        unsafe_allow_html=True,
+    )
+
+
+if blocked_validation:
+    current_step = 3
+elif not proposal:
+    current_step = 1
+elif st.session_state.get("decision"):
+    current_step = 5
+elif proposal["config"].get("status") == "running":
+    current_step = 4
+else:
+    current_step = 2
+render_stepper(current_step)
+
+tab_data, tab_design, tab_monitor, tab_harness = st.tabs(
+    [
+        "🗂️  0 · Ground with your data",
+        "📐  1–3 · Design & Validate",
+        "📊  4–5 · Monitor & Decide",
+        "⚙️  Ship · Harness GitOps",
+    ]
 )
+
+# ===== TAB 0: Ground the catalog in real data ==============================
+with tab_data:
+    st.markdown(
+        '<div class="section-header">Step 0 · Ground the catalog in your own data</div>',
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        '<span style="color:#94a3b8;font-size:0.85rem;">'
+        "ExpPilot ships with a <b>fabricated</b> demo catalog. Upload a transaction or event log "
+        "and it will measure your real audiences instead — population, daily traffic and baseline "
+        "conversion rate, which are the numbers that drive sample size and runtime."
+        "</span>",
+        unsafe_allow_html=True,
+    )
+    st.info(
+        "**What this can and cannot do.** A transaction log is observational — nobody was randomised "
+        "into a control or treatment arm — so it can ground an experiment's **design** but can never "
+        "supply its **measurement**. Precedent lifts stay synthetic until real experiments run.",
+        icon="ℹ️",
+    )
+
+    upload = st.file_uploader(
+        "Transaction or event log (CSV)",
+        type=["csv"],
+        key="derive_upload",
+        help="One row per transaction, order line, or event. Needs at minimum a user id and a timestamp.",
+    )
+
+    if upload is not None:
+        try:
+            try:
+                raw = pd.read_csv(upload, encoding="utf-8")
+            except UnicodeDecodeError:
+                upload.seek(0)
+                raw = pd.read_csv(upload, encoding="latin-1")
+
+            st.dataframe(raw.head(5), use_container_width=True)
+            st.caption(f"{len(raw):,} rows · {len(raw.columns)} columns")
+
+            cols = list(raw.columns)
+            guess = suggest_mapping(cols)
+            none_label = "— none —"
+
+            st.markdown('<div class="section-header">Map the concepts</div>', unsafe_allow_html=True)
+            st.markdown(
+                '<span style="color:#94a3b8;font-size:0.82rem;">'
+                "Derivation needs to know which column means what. Best guesses are pre-filled."
+                "</span>",
+                unsafe_allow_html=True,
+            )
+
+            def _idx(options: list[str], value: str | None) -> int:
+                return options.index(value) if value in options else 0
+
+            m1, m2, m3 = st.columns(3)
+            with m1:
+                user_col = st.selectbox(
+                    "👤 User identifier", cols, index=_idx(cols, guess["user_col"]),
+                    help="Identifies a person. Users, not rows, are what enter an experiment.",
+                )
+            with m2:
+                ts_col = st.selectbox(
+                    "🕒 Timestamp", cols, index=_idx(cols, guess["timestamp_col"]),
+                    help="Used to compute distinct users per active day.",
+                )
+            with m3:
+                seg_options = [none_label] + cols
+                seg_choice = st.selectbox(
+                    "🧩 Segment by (optional)", seg_options, index=_idx(seg_options, guess["segment_col"]),
+                    help="Splits the audience into segments, e.g. Country. Leave as none for a single audience.",
+                )
+
+            st.markdown("")
+            st.markdown("**What counts as a conversion?**")
+            rule = st.radio(
+                "Outcome rule",
+                ["repeat_event", "value_threshold"],
+                format_func=lambda r: {
+                    "repeat_event": "Repeat activity — the user has more than one distinct event",
+                    "value_threshold": "Value threshold — the user's summed value reaches a target",
+                }[r],
+                label_visibility="collapsed",
+            )
+
+            event_col = value_col = None
+            threshold = 0.0
+            if rule == "repeat_event":
+                ev_options = [none_label] + cols
+                ev_choice = st.selectbox(
+                    "Distinct event column", ev_options, index=_idx(ev_options, guess["event_col"]),
+                    help="e.g. InvoiceNo or order_id. Without it, each row counts as an event.",
+                )
+                event_col = None if ev_choice == none_label else ev_choice
+            else:
+                v1, v2 = st.columns(2)
+                with v1:
+                    val_options = [none_label] + cols
+                    val_choice = st.selectbox(
+                        "Value column", val_options, index=_idx(val_options, guess["value_col"]),
+                        help="Numeric column summed per user, e.g. revenue or line total.",
+                    )
+                    value_col = None if val_choice == none_label else val_choice
+                with v2:
+                    threshold = st.number_input("Threshold (>=)", min_value=0.01, value=100.0, step=10.0)
+
+            if st.button("📐  Derive audiences", type="primary"):
+                mapping = ColumnMapping(
+                    user_col=user_col,
+                    timestamp_col=ts_col,
+                    outcome_rule=rule,
+                    event_col=event_col,
+                    value_col=value_col,
+                    value_threshold=threshold,
+                    segment_col=None if seg_choice == none_label else seg_choice,
+                )
+                try:
+                    with st.spinner("Measuring audiences…"):
+                        # Aggregated here rather than server-side: a transaction log
+                        # can be hundreds of thousands of rows, and only the handful
+                        # of resulting segments needs to cross the wire.
+                        st.session_state["derived"] = derive_segments(raw, mapping)
+                except ValueError as exc:
+                    st.error(f"**Could not derive audiences.**\n\n{exc}")
+                    st.session_state.pop("derived", None)
+
+            derived = st.session_state.get("derived")
+            if derived:
+                meta = derived["meta"]
+                st.markdown('<div class="section-header">Measured audiences</div>', unsafe_allow_html=True)
+                st.caption(
+                    f"{meta['rows_used']:,} rows · {meta['distinct_users']:,} distinct users · "
+                    f"{meta['date_range'][0]} → {meta['date_range'][1]} · "
+                    f"conversion = {meta['outcome_definition']}"
+                )
+                st.dataframe(
+                    pd.DataFrame(derived["segments"])[
+                        ["segment_key", "display_name", "population", "daily_traffic", "baseline_conversion_rate"]
+                    ],
+                    use_container_width=True,
+                )
+                if derived["skipped"]:
+                    st.warning(
+                        "Skipped as too small to plan on: "
+                        + ", ".join(f"`{s['segment_key']}` ({s['reason']})" for s in derived["skipped"])
+                    )
+
+                replace = st.checkbox(
+                    "Replace the fabricated demo segments entirely",
+                    value=False,
+                    help="Off by default: the seeded precedents reference seeded segment keys, "
+                    "so removing them strands that history.",
+                )
+                if st.button("✅  Use these audiences", type="primary"):
+                    try:
+                        res = api(
+                            "POST",
+                            "/segments/derived",
+                            json={"segments": derived["segments"], "replace_seeded": replace},
+                        )
+                        st.success(
+                            f"Catalog updated — {res['inserted']} added, {res['updated']} updated"
+                            + (f", {res['deleted']} removed" if res.get("deleted") else "")
+                            + ". New experiments will now plan against these numbers."
+                        )
+                    except ApiError as exc:
+                        show_api_error(exc)
+        except Exception as exc:  # noqa: BLE001 - surface parse errors, never a traceback
+            st.error(f"**Could not read that CSV.** {type(exc).__name__}: {exc}")
+
+    with st.expander("📚  Current audience catalog"):
+        try:
+            catalog = api("GET", "/segments", timeout=20).get("segments", [])
+            if catalog:
+                frame = pd.DataFrame(catalog)
+                frame["source"] = frame["derived"].map({True: "your data", False: "demo seed"})
+                st.dataframe(
+                    frame[
+                        ["segment_key", "source", "population", "daily_traffic", "baseline_conversion_rate"]
+                    ],
+                    use_container_width=True,
+                )
+            else:
+                st.caption("Catalog is empty.")
+        except ApiError as exc:
+            show_api_error(exc)
 
 # ===== TAB 1: Experiment Design ===========================================
 with tab_design:
-    if not proposal:
+    if blocked_validation:
+        # The API refused to create the experiment. Show exactly which check
+        # failed rather than a 409 string.
+        st.markdown('<div class="section-header">Blocked before launch</div>', unsafe_allow_html=True)
+        st.markdown(
+            '<span style="color:#94a3b8;font-size:0.85rem;">'
+            "ExpPilot did not create this experiment, because a pre-launch check failed. "
+            "Nothing was written and no feature flag was claimed."
+            "</span>",
+            unsafe_allow_html=True,
+        )
+        st.markdown("")
+        render_validation(blocked_validation)
+        st.markdown("")
+        if st.button("← Start over"):
+            st.session_state.pop("blocked_validation", None)
+            st.rerun()
+    elif not proposal:
         st.markdown(
             """
             <div style="text-align:center; padding: 4rem 2rem;">
@@ -375,12 +783,55 @@ with tab_design:
         )
     else:
         config = proposal["config"]
-        hypothesis = proposal.get("hypothesis", {})
         recommendation = proposal.get("recommendation", {})
         validation = proposal.get("validation", {})
+        candidates = proposal.get("hypotheses", [])
+        selected_index = proposal.get("selected_hypothesis_index", 0)
 
-        # ── Key metrics row ──────────────────────────────────────────────
-        st.markdown('<div class="section-header">Experiment Design</div>', unsafe_allow_html=True)
+        # ── Step 2: choose the hypothesis ────────────────────────────────
+        # This comes first because everything below is *derived from* it.
+        # Previously the computed design was shown above a decorative list of
+        # hypotheses that could not actually be selected.
+        st.markdown('<div class="section-header">Step 2 · Choose a hypothesis</div>', unsafe_allow_html=True)
+        st.markdown(
+            '<span style="color:#94a3b8;font-size:0.82rem;">'
+            "Ranked by precedent strength. Selecting a different one re-derives the flag, "
+            "audience, metrics and sample size below."
+            "</span>",
+            unsafe_allow_html=True,
+        )
+        st.markdown("")
+
+        def _hyp_label(i: int) -> str:
+            hyp = candidates[i]
+            crown = "👑 " if i == 0 else ""
+            return (
+                f'{crown}{hyp["statement"]}  ·  segment: {hyp.get("segment", "–")}'
+                f'  ·  MDE {hyp.get("expected_mde", 0):.1%}'
+            )
+
+        if candidates:
+            # No explicit key: the widget is driven by `index`, so it always
+            # reflects the hypothesis the config was actually derived from. A
+            # persisted key could hold an index that no longer exists after the
+            # candidate list changes.
+            chosen = st.radio(
+                "Generated hypotheses",
+                options=list(range(len(candidates))),
+                index=min(selected_index, len(candidates) - 1),
+                format_func=_hyp_label,
+                label_visibility="collapsed",
+            )
+            if chosen != selected_index:
+                if st.button("↻  Reconfigure for this hypothesis", type="primary"):
+                    build_proposal(
+                        st.session_state.get("goal_text", goal), baseline, traffic, hypothesis_index=int(chosen)
+                    )
+                    st.rerun()
+
+        # ── The design derived from that choice ──────────────────────────
+        st.markdown("")
+        st.markdown('<div class="section-header">Derived design</div>', unsafe_allow_html=True)
         m1, m2, m3, m4 = st.columns(4)
         with m1:
             st.markdown(
@@ -411,87 +862,199 @@ with tab_design:
                 unsafe_allow_html=True,
             )
 
-        # ── Hypotheses ───────────────────────────────────────────────────
-        left, right = st.columns([3, 2])
-        with left:
-            st.markdown('<div class="section-header">Generated Hypotheses</div>', unsafe_allow_html=True)
-            for i, hyp in enumerate(proposal.get("hypotheses", []), 1):
-                st.markdown(
-                    f'<div class="hyp-card">'
-                    f'<div class="hyp-statement">{"👑 " if i == 1 else ""}{hyp["statement"]}</div>'
-                    f'<div class="hyp-meta">'
-                    f'Segment: <b>{hyp.get("segment", "–")}</b> · '
-                    f'MDE: <b>{hyp.get("expected_mde", 0):.1%}</b> · '
-                    f'Direction: <b>{hyp.get("direction", "–")}</b>'
-                    f"</div></div>",
-                    unsafe_allow_html=True,
-                )
+        st.markdown(
+            f'<div style="color:#94a3b8;font-size:0.84rem;margin-top:.7rem;">'
+            f'Audience <b style="color:#e2e8f0;">{config["audience_segment"]}</b>'
+            f'&nbsp;·&nbsp; Baseline <b style="color:#e2e8f0;">{config["baseline_rate"]:.2%}</b>'
+            f'&nbsp;·&nbsp; Primary metric <b style="color:#e2e8f0;">'
+            f'{recommendation.get("primary_metric", {}).get("metric_key", "conversion_rate")}</b>'
+            f'&nbsp;·&nbsp; Guardrails <b style="color:#e2e8f0;">'
+            f'{", ".join(config.get("guardrail_metrics", [])) or "none"}</b>'
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+        # Say where the planning inputs came from -- the difference between the
+        # segment's measured traffic and a typed-in number changes the runtime
+        # estimate by an order of magnitude.
+        if st.session_state.get("params_auto", True):
+            st.caption(
+                f"Baseline rate and daily traffic read from the **{config['audience_segment']}** "
+                "segment's observed data. The MDE is the mean lift of shipped precedents in this category."
+            )
+        else:
+            st.caption(
+                "Baseline rate and daily traffic are your manual overrides, not the segment's observed data."
+            )
 
-            btn_col1, btn_col2 = st.columns(2)
-            with btn_col1:
-                if st.button("▶️  Start Experiment", type="primary", use_container_width=True):
-                    result = requests.post(f"{API_URL}/experiments/{config['id']}/start", timeout=30)
-                    if result.ok:
-                        st.success("Experiment is now **running**!")
-                        st.balloons()
-                    else:
-                        st.error(result.text)
+        # ── Step 3: pre-launch checks, as a first-class panel ────────────
+        st.markdown("")
+        st.markdown('<div class="section-header">Step 3 · Pre-launch checks</div>', unsafe_allow_html=True)
+        render_validation(validation)
 
-            with btn_col2:
-                if st.button("⏹️  Conclude / Stop", type="secondary", use_container_width=True):
-                    result = requests.post(f"{API_URL}/experiments/{config['id']}/conclude", timeout=30)
-                    if result.ok:
-                        st.info("Experiment is now **concluded** and its flag/segment is freed!")
-                    else:
-                        st.error(result.text)
+        # ── Actions ─────────────────────────────────────────────────────
+        st.markdown("")
+        btn_col1, btn_col2, _ = st.columns([1, 1, 2])
+        with btn_col1:
+            if st.button("▶️  Start Experiment", type="primary", use_container_width=True):
+                try:
+                    api("POST", f"/experiments/{config['id']}/start", timeout=30)
+                    proposal["config"]["status"] = "running"
+                    st.success("Experiment is now **running** — open *Monitor & Decide* to feed it telemetry.")
+                except ApiError as exc:
+                    show_api_error(exc)
+        with btn_col2:
+            if st.button("⏹️  Conclude / Stop", use_container_width=True):
+                try:
+                    api("POST", f"/experiments/{config['id']}/conclude", timeout=30)
+                    proposal["config"]["status"] = "concluded"
+                    st.info("Concluded — the flag and audience segment are free again.")
+                except ApiError as exc:
+                    show_api_error(exc)
 
+        # ── Supporting detail, deliberately out of the main path ────────
+        st.markdown("")
+        with st.expander("🌳  Hypothesis ontology & branching"):
+            col_tree, col_branch = st.columns([3, 2])
+            with col_tree:
+                st.json(proposal["ontology"], expanded=False)
+            with col_branch:
+                st.markdown("**Branch a hypothesis**")
+                branch_statement = st.text_input("Child hypothesis", "Test clearer fee disclosure")
+                branch_rationale = st.text_input("Rationale", "It may reduce price anxiety before checkout.")
+                branch_segment = st.text_input("Target segment", "new_users")
+                if st.button("➕  Queue Branch"):
+                    try:
+                        proposal["ontology"] = api(
+                            "POST",
+                            f"/experiments/{config['id']}/ontology/branches",
+                            json={
+                                "parent_id": proposal["ontology"]["id"],
+                                "statement": branch_statement,
+                                "rationale": branch_rationale,
+                                "segment": branch_segment,
+                            },
+                            timeout=30,
+                        )
+                        st.success("Queued for review; no experiment was launched.")
+                        st.rerun()
+                    except ApiError as exc:
+                        show_api_error(exc)
 
-        with right:
-            st.markdown('<div class="section-header">Configuration</div>', unsafe_allow_html=True)
-            with st.expander("Full experiment config", expanded=False):
-                st.json(config)
-            with st.expander("Recommendation details", expanded=False):
-                st.json(recommendation)
-            with st.expander("Validation result", expanded=False):
-                st.json(validation)
-
-        # ── Ontology tree ────────────────────────────────────────────────
-        st.markdown('<div class="section-header">Hypothesis Ontology</div>', unsafe_allow_html=True)
-        col_tree, col_branch = st.columns([3, 2])
-        with col_tree:
-            st.json(proposal["ontology"])
-        with col_branch:
-            st.markdown("**Branch a hypothesis**")
-            branch_statement = st.text_input("Child hypothesis", "Test clearer fee disclosure")
-            branch_rationale = st.text_input("Rationale", "It may reduce price anxiety before checkout.")
-            branch_segment = st.text_input("Target segment", "new_users")
-            if st.button("➕  Queue Branch"):
-                response = requests.post(
-                    f"{API_URL}/experiments/{config['id']}/ontology/branches",
-                    json={
-                        "parent_id": proposal["ontology"]["id"],
-                        "statement": branch_statement,
-                        "rationale": branch_rationale,
-                        "segment": branch_segment,
-                    },
-                    timeout=30,
-                )
-                if response.ok:
-                    proposal["ontology"] = response.json()
-                    st.success("Queued for review; no experiment was launched.")
-                    st.rerun()
-                else:
-                    st.error(response.text)
+        with st.expander("🔧  Developer details (raw payloads)"):
+            st.caption("Experiment config")
+            st.json(config, expanded=False)
+            st.caption("Grounded recommendation")
+            st.json(recommendation, expanded=False)
+            st.caption("Validation report")
+            st.json(validation, expanded=False)
 
 # ===== TAB 2: Monitor & Analyze ==========================================
 with tab_monitor:
-    st.markdown('<div class="section-header">Upload Telemetry Data</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-header">Step 4 · Feed it telemetry</div>', unsafe_allow_html=True)
 
-    experiment_id = st.text_input(
-        "Experiment ID",
-        value=proposal["config"]["id"] if proposal else "",
-        help="Paste the experiment ID from the Design tab.",
-    )
+    # Pick from what actually exists rather than asking the user to carry an id
+    # across tabs by hand (which silently broke on every page reload).
+    try:
+        known = api("GET", "/experiments", timeout=20).get("experiments", [])
+    except ApiError as exc:
+        known = []
+        show_api_error(exc)
+
+    current_id = proposal["config"]["id"] if proposal else None
+    experiment_id = current_id or ""
+
+    if known:
+        ids = [e["id"] for e in known]
+        meta = {e["id"]: e for e in known}
+        default_idx = ids.index(current_id) if current_id in ids else 0
+        experiment_id = st.selectbox(
+            "Experiment",
+            ids,
+            index=default_idx,
+            format_func=lambda i: (
+                f"{i}  ·  {meta[i]['status']}  ·  {meta[i].get('audience_segment', '–')}"
+                f"  ·  {meta[i].get('flag_key', '–')}"
+            ),
+            help="Every experiment ExpPilot knows about — running ones first.",
+        )
+        if meta[experiment_id]["status"] == "validated":
+            st.info("This experiment hasn't been started yet. You can still analyze telemetry against it.")
+    elif current_id:
+        st.caption(f"Using the experiment from the Design tab: `{current_id}`")
+    else:
+        st.info("No experiments yet — create one in **Design & Validate** first.")
+
+    # ── Simulated telemetry ─────────────────────────────────────────────
+    if experiment_id:
+        with st.expander("🧪  Simulate telemetry — synthetic, with a known true effect"):
+            st.markdown(
+                '<span style="color:#94a3b8;font-size:0.82rem;">'
+                "Real telemetry only exists once a flag has actually served two variants. "
+                "This generates a simulated experiment with an effect <b>you choose</b>, then replays it "
+                "day by day through the real decision engine — so you can check the engine reaches the "
+                "right verdict, not just that it produces one."
+                "</span>",
+                unsafe_allow_html=True,
+            )
+            st.warning("Everything produced here is **simulated**. It is not production data.", icon="⚠️")
+
+            scenarios = {
+                "true_win": "Treatment genuinely better → should reach Scale",
+                "no_effect": "No real difference → should keep saying Continue",
+                "true_loss": "Treatment genuinely worse → should reach Stop",
+                "srm": "Broken traffic split → should Pause and refuse to analyse",
+                "guardrail_breach": "A guardrail degrades → should Rollback",
+            }
+            s1, s2, s3 = st.columns([2, 1, 1])
+            with s1:
+                scenario = st.selectbox(
+                    "Scenario", list(scenarios), format_func=lambda s: scenarios[s]
+                )
+            with s2:
+                sim_days = st.number_input("Days", 1, 120, 14)
+            with s3:
+                sim_seed = st.number_input("Seed", 0, 10_000, 42, help="Same seed → same data.")
+
+            if st.button("▶️  Run simulation", type="primary"):
+                try:
+                    with st.spinner("Simulating and replaying through the decision engine…"):
+                        sim = api(
+                            "POST",
+                            f"/experiments/{experiment_id}/simulate",
+                            json={"scenario": scenario, "seed": int(sim_seed), "days": int(sim_days)},
+                            timeout=120,
+                        )
+                    st.session_state["simulation"] = sim
+                    st.session_state["decision"] = sim["decision"]
+                except ApiError as exc:
+                    show_api_error(exc)
+
+            sim = st.session_state.get("simulation")
+            if sim:
+                truth = sim["ground_truth"]
+                if sim["engine_recovered_truth"]:
+                    st.success(
+                        f"**Engine recovered the truth.** Simulated a *{truth['scenario']}* "
+                        f"(true lift {truth['true_lift_abs']:+.2%}) and the engine concluded "
+                        f"**{sim['engine_action']}**, which is what it should."
+                    )
+                else:
+                    st.error(
+                        f"**Engine did not match the ground truth.** Expected "
+                        f"**{truth['expected_action']}**, got **{sim['engine_action']}**."
+                    )
+                g1, g2, g3 = st.columns(3)
+                g1.metric("True lift", f"{truth['true_lift_abs']:+.2%}")
+                g2.metric("Observed lift", f"{truth['observed_lift_abs']:+.2%}")
+                g3.metric("Engine verdict", str(sim["engine_action"]).upper())
+
+                trend = pd.DataFrame(sim["timeline"])
+                st.caption("Verdict per day — watch the readiness gate hold until day 7")
+                st.dataframe(
+                    trend[["day", "action", "confidence", "lift_abs", "prob_beats_control"]],
+                    use_container_width=True,
+                    height=240,
+                )
 
     # ── Input mode: CSV upload or manual ─────────────────────────────
     input_mode = st.radio(
@@ -715,20 +1278,16 @@ with tab_monitor:
                     with btn1:
                         if st.button("🔬  Analyze Selected Day", type="primary"):
                             if not experiment_id:
-                                st.warning("Please enter an Experiment ID above.")
+                                st.warning("Select an experiment above first.")
                             else:
-                                with st.spinner("Running statistical analysis…"):
-                                    response = requests.post(
-                                        f"{API_URL}/monitor",
-                                        json=_build_payload(row),
-                                        timeout=30,
-                                    )
-                                if response.ok:
-                                    result = response.json()
-                                    st.session_state["decision"] = result
+                                try:
+                                    with st.spinner("Running statistical analysis…"):
+                                        st.session_state["decision"] = api(
+                                            "POST", "/monitor", json=_build_payload(row), timeout=30
+                                        )
                                     st.session_state["csv_df"] = df
-                                else:
-                                    st.error(response.text)
+                                except ApiError as exc:
+                                    show_api_error(exc)
 
                     with btn2:
                         if st.button("📈  Analyze All Days (Batch)"):
@@ -775,25 +1334,25 @@ with tab_monitor:
             day_num = st.number_input("Day", 1, 365, 7)
 
         if st.button("🔬  Analyze Day", type="primary") and experiment_id:
-            with st.spinner("Running statistical analysis…"):
-                response = requests.post(
-                    f"{API_URL}/monitor",
-                    json={
-                        "experiment_id": experiment_id,
-                        "day": day_num,
-                        "control_n": control_n,
-                        "control_conversions": control_conv,
-                        "treatment_n": treatment_n,
-                        "treatment_conversions": treatment_conv,
-                        "guardrail_control_rate": gr_control,
-                        "guardrail_treatment_rate": gr_treatment,
-                    },
-                    timeout=30,
-                )
-            if response.ok:
-                st.session_state["decision"] = response.json()
-            else:
-                st.error(response.text)
+            try:
+                with st.spinner("Running statistical analysis…"):
+                    st.session_state["decision"] = api(
+                        "POST",
+                        "/monitor",
+                        json={
+                            "experiment_id": experiment_id,
+                            "day": day_num,
+                            "control_n": control_n,
+                            "control_conversions": control_conv,
+                            "treatment_n": treatment_n,
+                            "treatment_conversions": treatment_conv,
+                            "guardrail_control_rate": gr_control,
+                            "guardrail_treatment_rate": gr_treatment,
+                        },
+                        timeout=30,
+                    )
+            except ApiError as exc:
+                show_api_error(exc)
 
     # ── Decision results ─────────────────────────────────────────────
     decision = st.session_state.get("decision")
@@ -928,14 +1487,14 @@ with tab_harness:
         )
 
         if st.button("📄  Generate Manifest", type="primary"):
-            with st.spinner("Generating manifest…"):
-                response = requests.post(
-                    f"{API_URL}/experiments/{proposal['config']['id']}/harness-gitops",
-                    json={"action": decision["action"]},
-                    timeout=30,
-                )
-            if response.ok:
-                change = response.json()
+            try:
+                with st.spinner("Generating manifest…"):
+                    change = api(
+                        "POST",
+                        f"/experiments/{proposal['config']['id']}/harness-gitops",
+                        json={"action": decision["action"]},
+                        timeout=30,
+                    )
                 st.code(change["manifest"], language="yaml")
                 st.download_button(
                     "⬇️  Download manifest",
@@ -943,5 +1502,5 @@ with tab_harness:
                     file_name=change["filename"].split("/")[-1],
                     mime="application/x-yaml",
                 )
-            else:
-                st.error(response.text)
+            except ApiError as exc:
+                show_api_error(exc)

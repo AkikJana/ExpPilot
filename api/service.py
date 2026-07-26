@@ -19,11 +19,21 @@ from agents.narrator import narrate_decision
 from agents.recommender import find_precedents, infer_category, recommend
 from agents.validator import validate_experiment
 from data.db import get_conn, init_db
+from data.derive import persist_segments
 from data.seed import ensure_seeded
+from data.synth import SyntheticSpec, synthesize
 from harness.gitops import gitops_proposal
 from ontology.tree import initial_tree
 from rules_engine.decision import evaluate_decision
-from shared.models import DayStats, Decision, DecisionRecommendation, ExperimentConfig, Hypothesis, SegmentDayStats
+from shared.models import (
+    DayStats,
+    Decision,
+    DecisionRecommendation,
+    ExperimentConfig,
+    Hypothesis,
+    SegmentDayStats,
+    ValidationBlocked,
+)
 from stats.core import compute_day_stats, decide, power_analysis
 from stats.diagnostics import analyze_drivers
 
@@ -33,6 +43,11 @@ def _dump(model: object) -> dict:
 
 
 def _load_experiment(experiment_id: str) -> ExperimentConfig:
+    # Defensive, matching the other read paths in this module: against a database
+    # whose schema has not been created yet, the SELECT would raise "no such
+    # table" and surface as a 500. An unknown experiment should be a clean 404
+    # whether or not anything has been written yet.
+    init_db()
     conn = get_conn()
     try:
         row = conn.execute("SELECT config FROM experiments WHERE id = ?", (experiment_id,)).fetchone()
@@ -48,6 +63,7 @@ def create_experiment(
     baseline_rate: float | None = None,
     daily_traffic: int | None = None,
     segment_key: str | None = None,
+    hypothesis_index: int = 0,
 ) -> dict:
     """Create a proposal grounded in real flags, audiences, metrics, and
     historical precedents.
@@ -61,7 +77,11 @@ def create_experiment(
     category = infer_category(goal)
     precedents = find_precedents(category, segment_key, limit=5)
     candidates = hypotheses_for_goal(goal, precedents=precedents)
-    candidate = candidates[0]
+    # The caller picks which candidate to configure (Objective 1's "pick one"
+    # step). Index is clamped rather than trusted, so a stale UI selection can
+    # never IndexError the request.
+    selected_index = max(0, min(int(hypothesis_index or 0), len(candidates) - 1))
+    candidate = candidates[selected_index]
 
     recommendation = recommend(goal, preferred_segment=segment_key or candidate.get("segment"))
 
@@ -105,7 +125,10 @@ def create_experiment(
 
     validation = validate_experiment(config, primary_metric_key=recommendation.primary_metric["metric_key"])
     if not validation.passed:
-        raise ValueError("; ".join(issue.message for issue in validation.blocking))
+        # Nothing is persisted when a blocking check fails -- but the caller gets
+        # the full structured report, not a flattened sentence, so the UI can
+        # show which specific check failed and why.
+        raise ValidationBlocked(validation)
 
     tree = initial_tree(goal, candidates)
     conn = get_conn()
@@ -135,6 +158,7 @@ def create_experiment(
         conn.close()
     return {
         "hypotheses": candidates,
+        "selected_hypothesis_index": selected_index,
         "hypothesis": _dump(hypothesis),
         "config": _dump(config),
         "ontology": tree.as_dict(),
@@ -147,6 +171,135 @@ def create_experiment(
         },
         "validation": validation.as_dict(),
     }
+
+
+def persist_derived_segments(segments: list[dict], replace_seeded: bool = False) -> dict:
+    """Store audience segments measured from the user's own data.
+
+    The seeded catalog is fabricated; these rows are computed from a real upload,
+    so once they land the recommender, validator and sample-size maths all plan
+    against measured numbers instead of invented ones.
+    """
+    ensure_seeded()
+    counts = persist_segments(segments, replace_seeded=replace_seeded)
+    return {"status": "ok", **counts, "segment_keys": [s["segment_key"] for s in segments]}
+
+
+def list_segments() -> list[dict]:
+    """The audience catalog, flagged by whether each row was derived or seeded."""
+    ensure_seeded()
+    conn = get_conn()
+    try:
+        rows = conn.execute(
+            "SELECT segment_key, display_name, population, daily_traffic, "
+            "baseline_conversion_rate, description FROM segments ORDER BY daily_traffic DESC"
+        ).fetchall()
+    finally:
+        conn.close()
+    return [
+        {**dict(row), "derived": str(row["description"] or "").startswith("Derived from uploaded data")}
+        for row in rows
+    ]
+
+
+def simulate_experiment(
+    experiment_id: str,
+    scenario: str = "true_win",
+    seed: int = 42,
+    days: int | None = None,
+    lift_abs: float | None = None,
+) -> dict:
+    """Replay a simulated experiment day by day through the real decision engine.
+
+    The telemetry is generated with a known true effect, so the response carries
+    both the ground truth and what the engine concluded -- which turns the demo
+    into a check: did the engine actually recover the effect it was given?
+
+    Everything written here is simulated. It is persisted like real telemetry so
+    the timeline view works, and every response is tagged `synthetic: true`.
+    """
+    config = _load_experiment(experiment_id)
+    generated = synthesize(config, SyntheticSpec(scenario=scenario, lift_abs=lift_abs, days=days, seed=seed))
+    series: list[DayStats] = generated["days"]
+
+    timeline: list[dict] = []
+    final_decision: Decision | None = None
+    pending: list[tuple[DayStats, Decision]] = []
+
+    for index, day_stats in enumerate(series):
+        # Narrate only the last day: the rest exist for the trend line and would
+        # otherwise cost one model call each.
+        is_last = index == len(series) - 1
+        decision, _ = _decide_for_day(config, day_stats, None, allow_llm=is_last)
+        pending.append((day_stats, decision))
+        timeline.append(
+            {
+                "day": decision.day,
+                "action": decision.action_code,
+                "confidence": decision.confidence,
+                "lift_abs": decision.reasoning_stats.lift_abs,
+                "prob_beats_control": decision.reasoning_stats.prob_beats_control,
+                "p_value": decision.reasoning_stats.p_value,
+                "srm_flag": decision.reasoning_stats.srm_flag,
+                "guardrail_breach": decision.reasoning_stats.guardrail_breach,
+            }
+        )
+        if is_last:
+            final_decision = decision
+
+    # One transaction and one audit entry for the whole replay, rather than a
+    # round trip per simulated day.
+    _persist_days(pending)
+    audit_event(
+        "simulate_experiment",
+        {"experiment_id": experiment_id, "scenario": scenario, "seed": seed, "days": len(series)},
+        {"action": final_decision.action_code if final_decision else None, "synthetic": True},
+    )
+
+    ground_truth = generated["ground_truth"]
+    engine_action = final_decision.action_code if final_decision else None
+    return {
+        "synthetic": True,
+        "experiment_id": experiment_id,
+        "ground_truth": ground_truth,
+        "engine_action": engine_action,
+        "engine_recovered_truth": engine_action == ground_truth["expected_action"],
+        "timeline": timeline,
+        "decision": final_decision.model_dump(mode="json") if final_decision else None,
+    }
+
+
+def list_experiments() -> list[dict]:
+    """Every experiment with enough context to resume one after a page reload.
+
+    Without this the UI can only ever act on whatever is in the current session,
+    which is why the monitor step used to demand a hand-pasted experiment id.
+    """
+    ensure_seeded()
+    conn = get_conn()
+    try:
+        rows = conn.execute("SELECT id, config, status FROM experiments").fetchall()
+    finally:
+        conn.close()
+
+    experiments: list[dict] = []
+    for row in rows:
+        config = json.loads(row["config"])
+        experiments.append(
+            {
+                "id": row["id"],
+                "status": row["status"],
+                "flag_key": config.get("flag_key"),
+                "audience_segment": config.get("audience_segment"),
+                "required_n_per_arm": config.get("required_n_per_arm"),
+                "estimated_days": config.get("estimated_days"),
+            }
+        )
+    # Running first, then validated/draft, then concluded -- the order a user
+    # actually cares about when resuming work.
+    rank = {"running": 0, "validated": 1, "draft": 2, "paused": 3, "concluded": 4}
+    experiments.sort(key=lambda e: (rank.get(e["status"], 9), e["id"]))
+    return experiments
 
 
 def start_experiment(experiment_id: str) -> ExperimentConfig:
@@ -207,27 +360,54 @@ def reset_all_experiments() -> dict:
 
 
 
-def analyze_day(day: DayStats, segments: list[SegmentDayStats] | None = None) -> Decision:
+def analyze_day(
+    day: DayStats,
+    segments: list[SegmentDayStats] | None = None,
+    allow_llm: bool = True,
+) -> Decision:
     """Compute the deterministic decision for one day using evaluate_decision,
     then narrate it in business language.
+
+    `allow_llm=False` forces the deterministic template narrative; used when
+    replaying many days at once so the run does not make one model call per day.
     """
     config = _load_experiment(day.experiment_id)
+    decision, narrative_source = _decide_for_day(config, day, segments, allow_llm=allow_llm)
+    _persist_days([(day, decision)])
+    audit_event(
+        "analyze_day",
+        {"experiment_id": day.experiment_id, "day": day.day, "segments": bool(segments)},
+        {"action": decision.action_code, "narrative_source": narrative_source},
+    )
+    return decision
+
+
+def _decide_for_day(
+    config: ExperimentConfig,
+    day: DayStats,
+    segments: list[SegmentDayStats] | None = None,
+    allow_llm: bool = True,
+) -> tuple[Decision, str]:
+    """The pure decision for one day: statistics in, Decision out, no database.
+
+    Split out so a whole experiment can be replayed in memory and written once,
+    instead of one transaction per day.
+    """
     result = compute_day_stats(day, config, seed=day.day)
     rec = evaluate_decision(result, config)
     action = rec.action_code
-    confidence = rec.confidence_score
 
     driver_analysis = None
     if segments:
         driver_analysis = analyze_drivers(result.lift_abs, segments)
 
-    narrative, narrative_source = narrate_decision(rec, result, driver_analysis)
+    narrative, narrative_source = narrate_decision(rec, result, driver_analysis, allow_llm=allow_llm)
 
     decision = Decision(
         experiment_id=day.experiment_id,
         day=day.day,
         action=action,
-        confidence=float(confidence),
+        confidence=float(rec.confidence_score),
         reasoning_stats=result,
         narrative=narrative,
         requires_human=action in {"scale", "rollback", "stop", "pause"},
@@ -235,32 +415,38 @@ def analyze_day(day: DayStats, segments: list[SegmentDayStats] | None = None) ->
         human_reason=None,
         recommendation=rec,
     )
+    return decision, narrative_source
+
+
+def _persist_days(rows: list[tuple[DayStats, Decision]]) -> None:
+    """Write telemetry and decisions for one or more days in a single transaction.
+
+    Batching matters against a hosted database: a per-day connection and commit
+    cost several network round trips each, which made replaying a 14-day
+    experiment take about a minute.
+    """
+    if not rows:
+        return
     conn = get_conn()
     try:
-        conn.execute(
-            """
-            INSERT INTO day_stats(experiment_id, day, data) VALUES (?, ?, ?)
-            ON CONFLICT(experiment_id, day) DO UPDATE SET data = excluded.data
-            """,
-            (day.experiment_id, day.day, day.model_dump_json()),
-        )
-        conn.execute(
-            """
-            INSERT INTO decisions(experiment_id, day, data) VALUES (?, ?, ?)
-            ON CONFLICT(experiment_id, day) DO UPDATE SET data = excluded.data
-            """,
-            (day.experiment_id, day.day, decision.model_dump_json()),
-        )
-
+        for day, decision in rows:
+            conn.execute(
+                """
+                INSERT INTO day_stats(experiment_id, day, data) VALUES (?, ?, ?)
+                ON CONFLICT(experiment_id, day) DO UPDATE SET data = excluded.data
+                """,
+                (day.experiment_id, day.day, day.model_dump_json()),
+            )
+            conn.execute(
+                """
+                INSERT INTO decisions(experiment_id, day, data) VALUES (?, ?, ?)
+                ON CONFLICT(experiment_id, day) DO UPDATE SET data = excluded.data
+                """,
+                (day.experiment_id, day.day, decision.model_dump_json()),
+            )
         conn.commit()
     finally:
         conn.close()
-    audit_event(
-        "analyze_day",
-        {"experiment_id": day.experiment_id, "day": day.day, "segments": bool(segments)},
-        {"action": action, "narrative_source": narrative_source},
-    )
-    return decision
 
 
 def get_timeline(experiment_id: str) -> dict:
@@ -353,7 +539,32 @@ def branch_ontology(experiment_id: str, parent_id: str, statement: str, rational
 
 
 def propose_harness_gitops(experiment_id: str, action: str, segment: str | None = None) -> dict[str, str]:
-    return gitops_proposal(_load_experiment(experiment_id), action, segment)
+    """Build the reviewable flag change for a terminal decision.
+
+    Attaches the most recent stored decision so the manifest carries the numbers
+    that justified the change; a reviewer should not have to go and look them up.
+    """
+    config = _load_experiment(experiment_id)
+    decision = _latest_decision(experiment_id)
+    return gitops_proposal(config, action, segment, decision)
+
+
+def _latest_decision(experiment_id: str) -> Decision | None:
+    """The highest-day decision on record, or None if nothing has been analysed."""
+    conn = get_conn()
+    try:
+        row = conn.execute(
+            "SELECT data FROM decisions WHERE experiment_id = ? ORDER BY day DESC LIMIT 1",
+            (experiment_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        return None
+    try:
+        return Decision.model_validate_json(row["data"])
+    except Exception:  # noqa: BLE001 - provenance is a bonus, never a hard failure
+        return None
 
 
 def audit_event(node: str, input_data: dict, output_data: dict, thread_id: str | None = None) -> None:
